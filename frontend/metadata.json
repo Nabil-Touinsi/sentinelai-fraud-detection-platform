@@ -1,0 +1,5 @@
+{
+  "name": "SentinelAI - Fraud Detection Platform",
+  "description": "A real-time banking fraud detection dashboard simulating an AI-powered backend. Features transaction monitoring, risk scoring (Isolation Forest/XGBoost simulation), alert management, and Paris risk mapping.",
+  "requestFramePermissions": []
+}
