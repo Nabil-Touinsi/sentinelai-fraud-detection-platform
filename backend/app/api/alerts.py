@@ -5,19 +5,20 @@ from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select, func, desc, asc
+from sqlalchemy import asc, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import DemoAuthDep
 from app.db.session import get_db
 from app.models.alert import Alert
 from app.models.alert_event import AlertEvent
-from app.models.transaction import Transaction
 from app.models.risk_score import RiskScore
+from app.models.transaction import Transaction
 from app.schemas.alerts import (
-    AlertPatch,
-    AlertListResponse,
-    PageMeta,
     AlertEventOut,
+    AlertListResponse,
+    AlertPatch,
+    PageMeta,
 )
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
@@ -139,7 +140,8 @@ async def list_alert_events(
     return events
 
 
-@router.patch("/{alert_id}")
+# ✅ protégé par API Key (démo)
+@router.patch("/{alert_id}", dependencies=[DemoAuthDep])
 async def patch_alert(
     alert_id: uuid.UUID,
     payload: AlertPatch,
@@ -152,7 +154,7 @@ async def patch_alert(
 
     old_status = alert.status
     alert.status = payload.status.value
-    alert.updated_at = datetime.utcnow()
+    alert.updated_at = datetime.now(timezone.utc)
 
     db.add(
         AlertEvent(
@@ -161,7 +163,7 @@ async def patch_alert(
             old_status=old_status,
             new_status=alert.status,
             message=payload.comment,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
     )
 

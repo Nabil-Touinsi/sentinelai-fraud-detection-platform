@@ -1,4 +1,5 @@
 ﻿from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Pointe toujours vers backend/.env
@@ -9,11 +10,18 @@ class Settings(BaseSettings):
     # App
     APP_NAME: str = "SentinelAI API"
     ENV: str = "dev"
-    DEBUG: bool = True
+    DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    # Auth (démo)
+    API_KEY: str = ""
+
+    # Rate limit (option)
+    RATE_LIMIT_ENABLED: bool = False
+    RATE_LIMIT_RPM: int = 120
 
     # DB
     # ✅ Async (pour l'app avec SQLAlchemy async)

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,12 +38,23 @@ class ScoreResponse(BaseModel):
 async def _ws_broadcast(request: Request, payload: dict[str, Any]) -> None:
     """
     Broadcast best-effort (ne casse jamais /score si WS indispo).
-    On suppose que app.state.ws_manager existe avec une méthode async broadcast(payload).
+    Compatible avec ConnectionManager (broadcast_json).
     """
     try:
         manager = getattr(request.app.state, "ws_manager", None)
-        if manager and hasattr(manager, "broadcast"):
-            await manager.broadcast(payload)
+        if not manager:
+            return
+
+        # ✅ Rend le payload 100% JSON-safe (datetime/UUID/Decimal…)
+        safe_payload = jsonable_encoder(payload)
+
+        if hasattr(manager, "broadcast_json"):
+            await manager.broadcast_json(safe_payload)
+            return
+
+        # fallback si jamais tu changes de manager plus tard
+        if hasattr(manager, "broadcast"):
+            await manager.broadcast(safe_payload)
     except Exception:
         pass
 
@@ -139,14 +151,16 @@ async def score_one(
         await db.commit()
         await db.refresh(alert)
 
-        alert_dict = {
-            "id": str(alert.id),
-            "status": alert.status,
-            "score_snapshot": alert.score_snapshot,
-            "reason": alert.reason,
-            "created_at": alert.created_at,
-            "updated_at": alert.updated_at,
-        }
+        alert_dict = jsonable_encoder(
+            {
+                "id": str(alert.id),
+                "status": alert.status,
+                "score_snapshot": int(alert.score_snapshot),
+                "reason": alert.reason,
+                "created_at": alert.created_at,
+                "updated_at": alert.updated_at,
+            }
+        )
 
         # WS: alert created (ou upsert)
         await _ws_broadcast(

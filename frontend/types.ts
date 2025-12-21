@@ -21,7 +21,7 @@ export interface Transaction {
   currency: string;
   merchant_name: string;
   merchant_category: string; // ex: "ecommerce"
-  arrondissement: string; // ex: "Saint-Denis" (dans ton seed)
+  arrondissement: string; // ex: "75010"
   channel: string; // "card"...
   is_online: boolean;
   description?: string | null;
@@ -40,7 +40,7 @@ export interface Alert {
   transaction_id: string;
   risk_score_id?: string | null;
   score_snapshot: number;
-  status: string; // backend renvoie "A_TRAITER" etc (string OK + normalize)
+  status: AlertStatus | string; // backend renvoie "A_TRAITER" etc (string OK + normalize)
   reason: string;
   created_at: string;
   updated_at: string;
@@ -51,7 +51,7 @@ export interface Alert {
 export interface AlertListItem {
   alert: Alert;
   transaction: Transaction;
-  risk_score?: RiskScore;
+  risk_score?: RiskScore | null;
 }
 
 export interface AlertsListMeta {
@@ -74,24 +74,44 @@ export interface ScoreResponse {
   alert?: Alert | null;
 }
 
+// --- Dashboard ---
+export interface DashboardStats {
+  totalTransactionsToday: number;
+  openAlerts: number;
+  criticalAlerts: number;
+  avgResolutionTimeMinutes: number;
+}
+
+// --- Types UI (front) ---
+// Utilisé par Simulator.tsx : on garde Transaction "backend pure" + on ajoute un bloc risk côté UI.
+export type TransactionRiskUI = {
+  score: number;
+  level: string; // ex: "CRITIQUE" / "OK" (label UI)
+  factors: string[];
+};
+
+export type TransactionWithRiskUI = Transaction & {
+  risk?: TransactionRiskUI;
+};
+
 // --- Helpers UI (exports attendus par le front) ---
 export const normalizeAlertStatus = (status?: string | null): AlertStatus => {
   const s = (status || "").toUpperCase().trim();
 
   // compat éventuelle anciens libellés
   const map: Record<string, AlertStatus> = {
-    "A_TRAITER": AlertStatus.A_TRAITER,
-    "EN_ENQUETE": AlertStatus.EN_ENQUETE,
-    "CLOTURE": AlertStatus.CLOTURE,
+    A_TRAITER: AlertStatus.A_TRAITER,
+    EN_ENQUETE: AlertStatus.EN_ENQUETE,
+    CLOTURE: AlertStatus.CLOTURE,
 
     // vieux / alternatifs (au cas où)
-    "NOUVEAU": AlertStatus.A_TRAITER,
-    "NEW": AlertStatus.A_TRAITER,
-    "EN_COURS": AlertStatus.EN_ENQUETE,
-    "IN_REVIEW": AlertStatus.EN_ENQUETE,
-    "CLOSED": AlertStatus.CLOTURE,
+    NOUVEAU: AlertStatus.A_TRAITER,
+    NEW: AlertStatus.A_TRAITER,
+    EN_COURS: AlertStatus.EN_ENQUETE,
+    IN_REVIEW: AlertStatus.EN_ENQUETE,
+    CLOSED: AlertStatus.CLOTURE,
     "CLOTURÉ": AlertStatus.CLOTURE,
-    "CLOTUREE": AlertStatus.CLOTURE,
+    CLOTUREE: AlertStatus.CLOTURE,
   };
 
   return map[s] || AlertStatus.A_TRAITER;
@@ -131,3 +151,21 @@ export const getCategoryColor = (cat: string) => {
   };
   return map[(cat || "").toLowerCase()] || "bg-slate-500";
 };
+
+// --- Helpers robustes (mock / backend) ---
+// Permet au Dashboard de fonctionner même si les alertes sont "flatten" (mock) OU "AlertListItem" (backend).
+
+export const pickAlertStatus = (x: any): string =>
+  (x?.alert?.status ?? x?.status ?? "") as string;
+
+export const pickAlertScoreSnapshot = (x: any): number =>
+  Number(x?.alert?.score_snapshot ?? x?.score_snapshot ?? 0);
+
+export const pickAlertReason = (x: any): string =>
+  (x?.alert?.reason ?? x?.reason ?? "") as string;
+
+export const pickAlertCreatedAt = (x: any): string =>
+  (x?.alert?.created_at ?? x?.created_at ?? "") as string;
+
+export const pickTransaction = (x: any): Transaction | null =>
+  (x?.transaction ?? null) as Transaction | null;
