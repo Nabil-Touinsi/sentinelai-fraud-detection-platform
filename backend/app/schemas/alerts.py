@@ -28,6 +28,11 @@ class AlertEventOut(BaseModel):
     old_status: Optional[str] = None
     new_status: Optional[str] = None
     message: Optional[str] = None
+
+    # ✅ Option B : traçabilité
+    actor: Optional[str] = None
+    request_id: Optional[str] = None
+
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

@@ -8,16 +8,19 @@ import {
   getCategoryColor,
   normalizeAlertStatus,
 } from "../types";
+import { apiFetch } from "../services/api";
 
 const POLL_MS = 7000;
 
-const apiBase =
-  (import.meta as any).env?.VITE_API_BASE_URL?.replace(/\/$/, "") ||
+// ✅ une seule source de vérité: VITE_API_URL
+const API_URL =
+  (import.meta as any).env?.VITE_API_URL?.toString()?.replace(/\/+$/, "") ||
   "http://127.0.0.1:8000";
 
-const wsBase = apiBase.startsWith("https://")
-  ? apiBase.replace("https://", "wss://")
-  : apiBase.replace("http://", "ws://");
+// ✅ WS base dérivée de l'API
+const wsBase = API_URL.startsWith("https://")
+  ? API_URL.replace("https://", "wss://")
+  : API_URL.replace("http://", "ws://");
 
 type RtMode = "WebSocket" | "Polling";
 type TabKey = AlertStatus;
@@ -53,10 +56,25 @@ const TabButton = ({ label, count, active, onClick, icon }: TabButtonProps) => (
   </button>
 );
 
+function extractErrMsg(err: any): string {
+  if (!err) return "Erreur inconnue";
+  if (typeof err === "string") return err;
+  if (err?.error?.message) return err.error.message;
+  if (err?.message) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return "Erreur inconnue";
+  }
+}
+
 const Alerts = () => {
   const [items, setItems] = useState<AlertListItem[]>([]);
   const [activeTab, setActiveTab] = useState<TabKey>(AlertStatus.A_TRAITER);
   const [rtMode, setRtMode] = useState<RtMode>("Polling");
+
+  const [loading, setLoading] = useState(false);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -64,11 +82,20 @@ const Alerts = () => {
   const connectingRef = useRef(false);
 
   const fetchAlerts = async () => {
-    const url = `${apiBase}/alerts?page=1&page_size=200&sort_by=priority&order=desc`;
-    const res = await fetch(url, { credentials: "include" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = (await res.json()) as AlertsListResponse;
-    setItems(json.data ?? []);
+    setLoading(true);
+    setErrMsg(null);
+
+    try {
+      const json = await apiFetch<AlertsListResponse>(
+        `/alerts?page=1&page_size=200&sort_by=priority&order=desc`
+      );
+      setItems(json.data ?? []);
+    } catch (e: any) {
+      setErrMsg(extractErrMsg(e) || "Erreur lors du chargement des alertes");
+      throw e;
+    } finally {
+      setLoading(false);
+    }
   };
 
   const counts = useMemo(() => {
@@ -87,17 +114,20 @@ const Alerts = () => {
   }, [items, activeTab]);
 
   const patchAlert = async (alertId: string, status: AlertStatus, comment?: string) => {
-    const res = await fetch(`${apiBase}/alerts/${alertId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ status, comment: comment || "" }),
-    });
+    // ✅ règle backend : comment requis à la clôture
+    const safeComment =
+      status === AlertStatus.CLOTURE
+        ? (comment || "").trim() || "Clôture via UI"
+        : (comment || "").trim() || "Changement de statut via UI";
 
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(txt || `PATCH failed (${res.status})`);
-    }
+    await apiFetch(
+      `/alerts/${alertId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status, comment: safeComment }),
+      },
+      { auth: true }
+    );
   };
 
   const moveAlert = async (alertId: string, newStatus: AlertStatus) => {
@@ -114,7 +144,11 @@ const Alerts = () => {
     );
 
     try {
-      await patchAlert(alertId, newStatus, "Changement de statut via UI");
+      await patchAlert(
+        alertId,
+        newStatus,
+        newStatus === AlertStatus.CLOTURE ? "Clôture via UI" : "Changement de statut via UI"
+      );
       await fetchAlerts();
     } catch (e) {
       console.error(e);
@@ -125,10 +159,11 @@ const Alerts = () => {
   // initial load
   useEffect(() => {
     destroyedRef.current = false;
-    fetchAlerts().catch(console.error);
+    fetchAlerts().catch(() => {});
     return () => {
       destroyedRef.current = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // WS + fallback polling
@@ -137,7 +172,7 @@ const Alerts = () => {
       setRtMode("Polling");
       if (!pollRef.current) {
         pollRef.current = window.setInterval(() => {
-          fetchAlerts().catch(console.error);
+          fetchAlerts().catch(() => {});
         }, POLL_MS);
       }
     };
@@ -170,24 +205,18 @@ const Alerts = () => {
               msg?.type === "ALERT_STATUS_CHANGED" ||
               msg?.type === "SCORE_COMPUTED"
             ) {
-              fetchAlerts().catch(console.error);
+              fetchAlerts().catch(() => {});
             }
           } catch {
             // ignore
           }
         };
 
-        ws.onerror = () => {
-          // onclose will handle fallback
-        };
-
         ws.onclose = () => {
           connectingRef.current = false;
           wsRef.current = null;
           startPolling();
-          if (!destroyedRef.current) {
-            window.setTimeout(connectWs, 1500);
-          }
+          if (!destroyedRef.current) window.setTimeout(connectWs, 1500);
         };
       } catch {
         connectingRef.current = false;
@@ -213,6 +242,11 @@ const Alerts = () => {
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Gestion des dossiers</h1>
           <p className="text-slate-400 text-sm">Traitez les signalements prioritaires.</p>
+          {errMsg && (
+            <div className="mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+              {errMsg}
+            </div>
+          )}
         </div>
 
         <div className="text-xs px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/50 text-slate-300">
@@ -220,6 +254,7 @@ const Alerts = () => {
           <span className={rtMode === "WebSocket" ? "text-emerald-400" : "text-amber-400"}>
             {rtMode === "WebSocket" ? "WebSocket" : `Polling (${POLL_MS / 1000}s)`}
           </span>
+          {loading && <span className="ml-2 text-slate-500">• chargement…</span>}
         </div>
       </div>
 
@@ -277,9 +312,7 @@ const Alerts = () => {
                 className="bg-slate-900 hover:bg-slate-800/80 border border-slate-800 rounded-lg p-5 transition-all shadow-sm flex items-center justify-between group"
               >
                 <div className="flex items-center gap-5">
-                  <div
-                    className={`flex flex-col items-center justify-center w-12 h-12 rounded-lg border ${scoreClass}`}
-                  >
+                  <div className={`flex flex-col items-center justify-center w-12 h-12 rounded-lg border ${scoreClass}`}>
                     <span className="text-lg font-bold">{score}</span>
                   </div>
 
@@ -293,9 +326,7 @@ const Alerts = () => {
                         {tx.merchant_category}
                       </span>
                       <span className="text-slate-600 text-[10px]">•</span>
-                      <span className="text-xs text-slate-400">
-                        {new Date(alert.created_at).toLocaleString()}
-                      </span>
+                      <span className="text-xs text-slate-400">{new Date(alert.created_at).toLocaleString()}</span>
                     </div>
 
                     <div className="text-white font-medium flex items-center gap-2">
@@ -306,9 +337,7 @@ const Alerts = () => {
                       </span>
                     </div>
 
-                    <div className="text-sm text-slate-400 mt-0.5">
-                      Raison: {alert.reason || "Score élevé détecté"}
-                    </div>
+                    <div className="text-sm text-slate-400 mt-0.5">Raison: {alert.reason || "Score élevé détecté"}</div>
                   </div>
                 </div>
 
@@ -331,7 +360,11 @@ const Alerts = () => {
                     </button>
                   )}
 
-                  <button className="p-2 text-slate-500 hover:text-white hover:bg-slate-700 rounded-lg transition-colors">
+                  <button
+                    onClick={() => {}}
+                    className="p-2 text-slate-500 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
+                    aria-label="Détails"
+                  >
                     <ChevronRight size={20} />
                   </button>
                 </div>

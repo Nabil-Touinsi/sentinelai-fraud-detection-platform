@@ -25,8 +25,21 @@ class AlertEvent(Base):
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     old_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     new_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # ✅ pourquoi (motif / commentaire)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, index=True)
+    # ✅ Option B : qui a fait l'action
+    actor: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    # ✅ Option B : traçabilité (request_id de la requête HTTP)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        index=True,
+    )
 
     alert = relationship("Alert", back_populates="events", lazy="joined")

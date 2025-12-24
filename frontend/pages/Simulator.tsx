@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
-import { Transaction, getCategoryColor, RiskLevel } from '../types';
-import { ArrowRight, Play, Shield, AlertTriangle, CheckCircle } from 'lucide-react';
+// frontend/pages/Simulator.tsx
+import React, { useState } from "react";
+import { Transaction, getCategoryColor, RiskLevel } from "../types";
+import { ArrowRight, Play, Shield, AlertTriangle, CheckCircle } from "lucide-react";
+import { apiFetch } from "../services/api";
 
-type ScenarioType = 'NORMAL' | 'FRAUD';
+type ScenarioType = "NORMAL" | "FRAUD";
 
 type TxCreateResponse = {
   id: string;
@@ -38,14 +40,14 @@ type ScoreResponse = {
 type TransactionWithRisk = Transaction & {
   risk?: {
     score: number;
-    level: 'CRITIQUE' | RiskLevel | string;
+    level: "CRITIQUE" | RiskLevel | string;
     factors: string[];
   };
 };
 
-const API_BASE =
-  (import.meta as any).env?.VITE_API_URL?.toString()?.replace(/\/+$/, '') ||
-  'http://127.0.0.1:8000';
+const API_URL =
+  (import.meta as any).env?.VITE_API_URL?.toString()?.replace(/\/+$/, "") ||
+  "http://127.0.0.1:8000";
 
 function isoNowPlusMinutes(deltaMinutes: number) {
   const d = new Date(Date.now() + deltaMinutes * 60 * 1000);
@@ -53,57 +55,55 @@ function isoNowPlusMinutes(deltaMinutes: number) {
 }
 
 function buildScenarioPayload(type: ScenarioType) {
-  if (type === 'FRAUD') {
+  if (type === "FRAUD") {
     return {
       occurred_at: isoNowPlusMinutes(0),
       amount: 9999.99,
-      currency: 'EUR',
-      merchant_name: 'WS Test Extreme',
-      merchant_category: 'ecommerce',
-      arrondissement: '75010',
-      channel: 'card',
+      currency: "EUR",
+      merchant_name: "WS Test Extreme",
+      merchant_category: "ecommerce",
+      arrondissement: "75010",
+      channel: "card",
       is_online: true,
-      description: 'test ws',
+      description: "test ws",
     };
   }
 
   return {
     occurred_at: isoNowPlusMinutes(0),
     amount: 24.9,
-    currency: 'EUR',
-    merchant_name: 'Carrefour City',
-    merchant_category: 'supermarche',
-    arrondissement: '75011',
-    channel: 'card',
+    currency: "EUR",
+    merchant_name: "Carrefour City",
+    merchant_category: "supermarche",
+    arrondissement: "75011",
+    channel: "card",
     is_online: false,
-    description: 'achat quotidien',
+    description: "achat quotidien",
   };
 }
 
 function uiRiskLevelFromBackend(score: number, threshold: number, risk_level: string) {
   // Ton UI utilise "CRITIQUE" pour déclencher "Action Requise"
-  if (score >= threshold) return 'CRITIQUE';
+  if (score >= threshold) return "CRITIQUE";
 
   // Sinon on reste proche du backend
-  const r = (risk_level || '').toUpperCase();
-  if (r.includes('HIGH')) return RiskLevel.HIGH;
-  if (r.includes('MEDIUM')) return RiskLevel.MEDIUM;
-  if (r.includes('LOW')) return RiskLevel.LOW;
+  const r = (risk_level || "").toUpperCase();
+  if (r.includes("HIGH")) return RiskLevel.HIGH;
+  if (r.includes("MEDIUM")) return RiskLevel.MEDIUM;
+  if (r.includes("LOW")) return RiskLevel.LOW;
   return RiskLevel.LOW;
 }
 
-async function apiPost<T>(path: string, body: any): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`${path} -> ${res.status} ${res.statusText} ${txt}`);
+function extractErrMsg(err: any): string {
+  if (!err) return "Erreur inconnue";
+  if (typeof err === "string") return err;
+  if (err?.error?.message) return err.error.message;
+  if (err?.message) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return "Erreur inconnue";
   }
-  return (await res.json()) as T;
 }
 
 const Simulator = () => {
@@ -118,10 +118,16 @@ const Simulator = () => {
     try {
       // 1) Crée une transaction réelle (DB)
       const txPayload = buildScenarioPayload(type);
-      const tx = await apiPost<TxCreateResponse>('/transactions', txPayload);
+      const tx = await apiFetch<TxCreateResponse>("/transactions", {
+        method: "POST",
+        body: JSON.stringify(txPayload),
+      });
 
       // 2) Score la transaction (et crée une alerte si score >= threshold)
-      const score = await apiPost<ScoreResponse>('/score', { transaction_id: tx.id });
+      const score = await apiFetch<ScoreResponse>("/score", {
+        method: "POST",
+        body: JSON.stringify({ transaction_id: tx.id }),
+      });
 
       // 3) Merge en objet UI (Transaction + risk)
       const merged: TransactionWithRisk = {
@@ -136,7 +142,7 @@ const Simulator = () => {
       setLastTx(merged);
     } catch (e: any) {
       console.error(e);
-      setError(e?.message ?? 'Erreur inconnue');
+      setError(extractErrMsg(e));
       setLastTx(null);
     } finally {
       setLoading(false);
@@ -148,11 +154,11 @@ const Simulator = () => {
       <div className="text-center mb-10">
         <h1 className="text-3xl font-bold text-white tracking-tight mb-3">Espace Démonstration</h1>
         <p className="text-slate-400 text-lg max-w-2xl mx-auto">
-          Testez la réactivité du système en simulant des transactions. Observez comment l&apos;outil
-          distingue une opération standard d&apos;un comportement suspect.
+          Testez la réactivité du système en simulant des transactions. Observez comment l&apos;outil distingue une
+          opération standard d&apos;un comportement suspect.
         </p>
         <p className="text-xs text-slate-500 mt-3">
-          Backend: <span className="text-slate-300">{API_BASE}</span>
+          Backend: <span className="text-slate-300">{API_URL}</span>
         </p>
       </div>
 
@@ -162,7 +168,7 @@ const Simulator = () => {
           <h2 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Créer un scénario</h2>
 
           <button
-            onClick={() => handleInject('NORMAL')}
+            onClick={() => handleInject("NORMAL")}
             disabled={loading}
             className="w-full p-6 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-xl flex items-center gap-4 transition-all group text-left"
           >
@@ -176,7 +182,7 @@ const Simulator = () => {
           </button>
 
           <button
-            onClick={() => handleInject('FRAUD')}
+            onClick={() => handleInject("FRAUD")}
             disabled={loading}
             className="w-full p-6 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-xl flex items-center gap-4 transition-all group text-left"
           >
@@ -190,9 +196,7 @@ const Simulator = () => {
           </button>
 
           {error && (
-            <div className="mt-2 p-3 rounded-lg border border-red-800 bg-red-950/40 text-red-200 text-sm">
-              {error}
-            </div>
+            <div className="mt-2 p-3 rounded-lg border border-red-800 bg-red-950/40 text-red-200 text-sm">{error}</div>
           )}
         </div>
 
@@ -216,7 +220,7 @@ const Simulator = () => {
                       lastTx.merchant_category
                     )}`}
                   >
-                    {lastTx.merchant_name?.charAt(0) ?? 'T'}
+                    {lastTx.merchant_name?.charAt(0) ?? "T"}
                   </div>
                   <div>
                     <div className="text-white font-medium">{lastTx.merchant_name}</div>
@@ -231,12 +235,12 @@ const Simulator = () => {
 
                 <div
                   className={`px-4 py-1.5 rounded-full text-sm font-bold border ${
-                    lastTx.risk?.level === 'CRITIQUE'
-                      ? 'bg-red-500 text-white border-red-600'
-                      : 'bg-emerald-500 text-white border-emerald-600'
+                    lastTx.risk?.level === "CRITIQUE"
+                      ? "bg-red-500 text-white border-red-600"
+                      : "bg-emerald-500 text-white border-emerald-600"
                   }`}
                 >
-                  {lastTx.risk?.level === 'CRITIQUE' ? 'Action Requise' : 'Validé'}
+                  {lastTx.risk?.level === "CRITIQUE" ? "Action Requise" : "Validé"}
                 </div>
               </div>
 
@@ -249,7 +253,7 @@ const Simulator = () => {
                   <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden">
                     <div
                       className={`h-full transition-all duration-1000 ${
-                        (lastTx.risk?.score ?? 0) > 50 ? 'bg-red-500' : 'bg-emerald-500'
+                        (lastTx.risk?.score ?? 0) > 50 ? "bg-red-500" : "bg-emerald-500"
                       }`}
                       style={{ width: `${lastTx.risk?.score ?? 0}%` }}
                     />
@@ -278,7 +282,7 @@ const Simulator = () => {
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-slate-600 border-2 border-dashed border-slate-800 rounded-lg bg-slate-900/30">
-              <p>En attente d'une simulation...</p>
+              <p>En attente d&apos;une simulation...</p>
             </div>
           )}
         </div>

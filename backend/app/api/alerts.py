@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import List
 
@@ -22,6 +23,7 @@ from app.schemas.alerts import (
 )
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
+log = logging.getLogger("app.alerts")
 
 
 def _priority_order():
@@ -152,8 +154,19 @@ async def patch_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
+    # ✅ request_id (pour traçabilité)
+    rid = getattr(request.state, "request_id", None) or str(uuid.uuid4())
+
+    # ✅ actor (Option B : stocké en colonne)
+    actor = request.headers.get("X-Actor") or "demo_admin"
+
+    # ✅ "pourquoi" obligatoire si clôture
+    new_status = payload.status.value
+    if new_status == "CLOTURE" and not (payload.comment and payload.comment.strip()):
+        raise HTTPException(status_code=422, detail="comment is required when closing an alert")
+
     old_status = alert.status
-    alert.status = payload.status.value
+    alert.status = new_status
     alert.updated_at = datetime.now(timezone.utc)
 
     db.add(
@@ -163,6 +176,8 @@ async def patch_alert(
             old_status=old_status,
             new_status=alert.status,
             message=payload.comment,
+            actor=actor,          # ✅ Option B
+            request_id=rid,       # ✅ Option B
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -176,6 +191,18 @@ async def patch_alert(
         "updated_at": _iso(alert.updated_at),
     }
 
+    # ✅ log structuré action alerte
+    log.info(
+        "alert_status_change",
+        extra={
+            "request_id": rid,
+            "actor": actor,
+            "alert_id": str(alert.id),
+            "old_status": old_status,
+            "new_status": alert.status,
+        },
+    )
+
     # ✅ WS event “status changé”
     await _safe_broadcast(
         request,
@@ -186,6 +213,8 @@ async def patch_alert(
                 "alert": alert_payload,
                 "old_status": old_status,
                 "comment": payload.comment,
+                "actor": actor,
+                "request_id": rid,
             },
         },
     )

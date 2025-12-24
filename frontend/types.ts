@@ -40,7 +40,7 @@ export interface Alert {
   transaction_id: string;
   risk_score_id?: string | null;
   score_snapshot: number;
-  status: AlertStatus | string; // backend renvoie "A_TRAITER" etc (string OK + normalize)
+  status: AlertStatus | string;
   reason: string;
   created_at: string;
   updated_at: string;
@@ -74,6 +74,26 @@ export interface ScoreResponse {
   alert?: Alert | null;
 }
 
+// --- Transactions list (backend/mock) ---
+// Le endpoint /transactions renvoie généralement une liste structurée similaire à /alerts
+export interface TransactionListItem {
+  transaction: Transaction;
+  risk_score?: RiskScore | null;
+  alert?: Alert | null;
+}
+
+// meta optionnelle (si paginé)
+export interface TransactionsListMeta {
+  page?: number;
+  page_size?: number;
+  total?: number;
+}
+
+export interface TransactionsListResponse {
+  data: TransactionListItem[];
+  meta?: TransactionsListMeta;
+}
+
 // --- Dashboard ---
 export interface DashboardStats {
   totalTransactionsToday: number;
@@ -94,11 +114,48 @@ export type TransactionWithRiskUI = Transaction & {
   risk?: TransactionRiskUI;
 };
 
+// --- ✅ Legacy type attendu par Transactions.tsx ---
+// Certaines pages Transactions utilisent un format "flat" (ancien UI).
+// On le définit ici pour éviter l'import cassé, puis on migrera la page vers TransactionListItem.
+export type FullTransactionData = {
+  id: string;
+  amount: string | number;
+  currency?: string;
+  merchant_name?: string;
+  merchant_category?: string;
+  arrondissement?: string;
+  channel?: string;
+  is_online?: boolean;
+
+  // dates (legacy)
+  occurred_at?: string;
+  timestamp?: string;
+
+  // risk (legacy)
+  risk_score?: number;
+  risk_level?: RiskLevel | string;
+  score?: number;
+  level?: RiskLevel | string;
+
+  // alert (legacy)
+  alert_status?: AlertStatus | string;
+  status?: AlertStatus | string;
+
+  // map (ParisMap)
+  zone_paris?: number;
+
+  // hotspots (ParisMap)
+  count?: number;
+
+  // risk (UI/map)
+  risk?: { score: number; factors?: string[] };
+};
+
+
 // --- Helpers UI (exports attendus par le front) ---
 export const normalizeAlertStatus = (status?: string | null): AlertStatus => {
   const s = (status || "").toUpperCase().trim();
 
-  // compat éventuelle anciens libellés
   const map: Record<string, AlertStatus> = {
     A_TRAITER: AlertStatus.A_TRAITER,
     EN_ENQUETE: AlertStatus.EN_ENQUETE,
@@ -153,10 +210,10 @@ export const getCategoryColor = (cat: string) => {
 };
 
 // --- Helpers robustes (mock / backend) ---
-// Permet au Dashboard de fonctionner même si les alertes sont "flatten" (mock) OU "AlertListItem" (backend).
+// Permet au Dashboard / UI de fonctionner même si les données sont "flatten" OU "nested".
 
 export const pickAlertStatus = (x: any): string =>
-  (x?.alert?.status ?? x?.status ?? "") as string;
+  (x?.alert?.status ?? x?.status ?? x?.alert_status ?? "") as string;
 
 export const pickAlertScoreSnapshot = (x: any): number =>
   Number(x?.alert?.score_snapshot ?? x?.score_snapshot ?? 0);
@@ -169,3 +226,22 @@ export const pickAlertCreatedAt = (x: any): string =>
 
 export const pickTransaction = (x: any): Transaction | null =>
   (x?.transaction ?? null) as Transaction | null;
+
+// ✅ Safe pickers pour Transactions UI (évite crash)
+export const pickTxAmount = (x: any): number => {
+  const raw =
+    x?.transaction?.amount ??
+    x?.amount ??
+    0;
+  const n = typeof raw === "string" ? Number(raw) : Number(raw);
+  return Number.isFinite(n) ? n : 0;
+};
+
+export const pickTxDate = (x: any): string => {
+  return (
+    x?.transaction?.occurred_at ??
+    x?.occurred_at ??
+    x?.timestamp ??
+    ""
+  );
+};

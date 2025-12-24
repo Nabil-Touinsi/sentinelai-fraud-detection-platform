@@ -1,33 +1,52 @@
-import React from 'react';
-import { FullTransactionData } from '../types';
+import React from "react";
+import { FullTransactionData } from "../types";
 
 interface Props {
   data: FullTransactionData[];
 }
 
 const ParisMap: React.FC<Props> = ({ data }) => {
-  // Calcul densité risque
-  const zoneStats = Array(20).fill(0).map((_, i) => {
-    const zoneId = i + 1;
-    const txInZone = data.filter(t => t.zone_paris === zoneId);
-    if (txInZone.length === 0) return { count: 0, avgRisk: 0 };
-    
-    const avgRisk = txInZone.reduce((acc, curr) => acc + (curr.risk?.score || 0), 0) / txInZone.length;
-    return { count: txInZone.length, avgRisk };
-  });
+  // stats par zone: count = somme(count) et avgRisk pondéré
+  const zoneStats = Array(20)
+    .fill(0)
+    .map((_, i) => {
+      const zoneId = i + 1;
+      const items = data.filter((t) => t.zone_paris === zoneId);
 
+      if (items.length === 0) return { count: 0, avgRisk: 0 };
+
+      const totalCount = items.reduce((acc, curr) => acc + (curr.count ?? 1), 0);
+
+      const weightedRiskSum = items.reduce((acc, curr) => {
+        const c = curr.count ?? 1;
+        const r = curr.risk?.score ?? 0;
+        return acc + r * c;
+      }, 0);
+
+      const avgRisk = totalCount > 0 ? weightedRiskSum / totalCount : 0;
+
+      return { count: totalCount, avgRisk };
+    });
+
+  // Couleur = surtout selon la fréquence (count), et le risque ajoute un "glow"
   const getColor = (risk: number, count: number) => {
-    if (count === 0) return 'bg-slate-800/50 border-slate-800 text-slate-600';
-    if (risk < 40) return 'bg-emerald-500/20 border-emerald-500/30 text-emerald-400';
-    if (risk < 70) return 'bg-amber-500/20 border-amber-500/30 text-amber-400';
-    return 'bg-red-500/20 border-red-500/30 text-red-400 shadow-[0_0_15px_rgba(239,68,68,0.2)] animate-pulse';
+    if (count === 0) return "bg-slate-800/50 border-slate-800 text-slate-600";
+
+    // seuils simples (tu peux ajuster)
+    if (count <= 2) return "bg-emerald-500/25 border-emerald-500/35 text-emerald-300";
+    if (count <= 5) return "bg-amber-500/25 border-amber-500/35 text-amber-300";
+
+    // fréquent -> rouge, pulse seulement si avgRisk élevé
+    return risk >= 70
+      ? "bg-red-500/25 border-red-500/35 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.25)] animate-pulse"
+      : "bg-red-500/20 border-red-500/30 text-red-300 shadow-[0_0_10px_rgba(239,68,68,0.15)]";
   };
 
   return (
     <div className="h-full flex flex-col">
       <div className="flex-1 grid grid-cols-5 gap-2">
         {zoneStats.map((stat, idx) => (
-          <div 
+          <div
             key={idx}
             className={`
               relative rounded flex flex-col items-center justify-center border text-[10px] font-mono cursor-help group transition-all duration-300
@@ -35,16 +54,28 @@ const ParisMap: React.FC<Props> = ({ data }) => {
             `}
           >
             <span className="font-bold">{idx + 1}</span>
-            
+
+            {/* petit badge count */}
+            {stat.count > 0 && (
+              <span className="mt-1 text-[10px] font-bold opacity-90">
+                {stat.count}
+              </span>
+            )}
+
             {/* Tooltip */}
-            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-40 bg-slate-800 border border-slate-600 p-3 rounded shadow-xl hidden group-hover:block z-20 text-center pointer-events-none">
-                <div className="text-white font-bold mb-1">Paris {idx+1}</div>
-                <div className="text-slate-300 text-[10px]">Signalements: {stat.count}</div>
-                {stat.count > 0 && <div className="text-slate-400 text-[10px]">Risque Moy: {Math.round(stat.avgRisk)}/100</div>}
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-44 bg-slate-800 border border-slate-600 p-3 rounded shadow-xl hidden group-hover:block z-20 text-center pointer-events-none">
+              <div className="text-white font-bold mb-1">Paris {idx + 1}</div>
+              <div className="text-slate-300 text-[10px]">Signalements: {stat.count}</div>
+              {stat.count > 0 && (
+                <div className="text-slate-400 text-[10px]">
+                  Risque moy: {Math.round(stat.avgRisk)}/100
+                </div>
+              )}
             </div>
           </div>
         ))}
       </div>
+
       <div className="mt-3 flex justify-between text-[10px] text-slate-500 font-medium">
         <span>Activité normale</span>
         <span>Signalements fréquents</span>

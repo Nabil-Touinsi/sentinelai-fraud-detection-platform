@@ -14,7 +14,7 @@ from app.api.router import api_router
 from app.core.settings import settings
 from app.core.logging import setup_logging
 from app.core.errors import error_payload, AppHTTPException
-from app.core.request_id import set_request_id, get_request_id
+from app.core.request_id import set_request_id, get_request_id, ensure_request_id
 from app.core.rate_limit import rate_limiter  # ✅ NEW
 
 # ✅ realtime WS manager + WS router
@@ -30,7 +30,15 @@ class UTF8JSONResponse(JSONResponse):
 # --- Logging (niveau depuis .env si dispo) ---
 LOG_LEVEL = getattr(settings, "LOG_LEVEL", "INFO")
 setup_logging(LOG_LEVEL)
+
+# logger principal projet (tu peux garder)
 log = logging.getLogger("sentinelai")
+
+# logger dédié observabilité HTTP (mieux séparé)
+http_log = logging.getLogger("app.http")
+
+# seuil slow request
+SLOW_MS = int(getattr(settings, "SLOW_REQUEST_MS", 800))
 
 
 def _split_origins(value: str) -> list[str]:
@@ -51,8 +59,10 @@ app.state.ws_manager = ConnectionManager()
 # --- CORS ---
 origins = _split_origins(getattr(settings, "CORS_ORIGINS", ""))
 
-# Vite dev (5173) si jamais CORS_ORIGINS est vide
+# ✅ Dev origins (Vite 5173 + React 3000) si jamais CORS_ORIGINS est vide
 default_dev_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
@@ -60,9 +70,15 @@ default_dev_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins or default_dev_origins,
-    allow_credentials=False,  # ✅ pas de cookies -> plus safe
+    allow_credentials=False,  # ✅ pas de cookies
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Request-Id"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-API-Key",
+        "X-Actor",        # ✅ demandé
+        "X-Request-Id",
+    ],
 )
 
 # --- Routers ---
@@ -72,26 +88,51 @@ app.include_router(api_router)
 app.include_router(ws_router)
 
 
-# --- Middleware request_id + logs ---
+# --- Middleware observabilité : request_id + timing + logs structurés ---
 @app.middleware("http")
-async def request_context_and_logs(request: Request, call_next):
-    rid = request.headers.get("x-request-id") or str(uuid.uuid4())
-
-    # ✅ accessible via tes helpers + via request.state (utile pour deps/security)
-    set_request_id(rid)
+async def request_observability(request: Request, call_next):
+    # ✅ prend le header si fourni, sinon génère
+    rid = ensure_request_id(request.headers.get("X-Request-Id"))
     request.state.request_id = rid
 
-    start = time.time()
-    response = await call_next(request)
-    duration_ms = int((time.time() - start) * 1000)
+    start = time.perf_counter()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        duration_ms = int((time.perf_counter() - start) * 1000)
 
-    response.headers["x-request-id"] = rid
-    log.info("%s %s -> %s (%sms)", request.method, request.url.path, response.status_code, duration_ms)
-    return response
+        # ✅ Toujours renvoyer le request id
+        try:
+            if response is not None:
+                response.headers["X-Request-Id"] = rid
+        except Exception:
+            pass
+
+        level = logging.WARNING if duration_ms >= SLOW_MS else logging.INFO
+        http_log.log(
+            level,
+            "request",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": getattr(response, "status_code", None),
+                "duration_ms": duration_ms,
+                "client_ip": request.client.host if request.client else None,
+            },
+        )
+
+        # ✅ reset contextvar (propre si reuse thread/event loop)
+        set_request_id(None)
 
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
+    # ✅ IMPORTANT: ne jamais rate-limit / bloquer les préflights CORS
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     # limiter seulement les endpoints REST sensibles
     if request.url.path.startswith(("/transactions", "/alerts", "/score")):
         try:
@@ -116,7 +157,6 @@ async def rate_limit_middleware(request: Request, call_next):
             )
 
     return await call_next(request)
-
 
 
 # --- Error handlers (format standard, no stacktrace côté client) ---
