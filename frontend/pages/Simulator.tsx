@@ -4,6 +4,34 @@ import { Transaction, getCategoryColor, RiskLevel } from "../types";
 import { ArrowRight, Play, Shield, AlertTriangle, CheckCircle } from "lucide-react";
 import { apiFetch } from "../services/api";
 
+/**
+ * Page Simulator (Espace Démonstration)
+ *
+ * Rôle :
+ * - Permet d’injecter des transactions “réelles” dans le backend (POST /transactions),
+ *   puis de déclencher le scoring (POST /score).
+ * - Objectif produit : montrer la réactivité du système et illustrer la différence
+ *   entre un comportement “normal” et un cas “suspect”.
+ *
+ * Données / flux :
+ * - 1) buildScenarioPayload() génère un payload cohérent (montant, merchant, zone, online…)
+ * - 2) POST /transactions crée une transaction en base
+ * - 3) POST /score calcule un score et peut créer une alerte si score >= threshold
+ * - 4) On fusionne la réponse backend en un objet UI (Transaction + risk)
+ *
+ * Hypothèses importantes :
+ * - Le backend accepte des champs simples (strings / number) pour éviter les erreurs de parsing.
+ * - Le scoring renvoie :
+ *   - score (0..100)
+ *   - threshold (seuil d’alerte)
+ *   - factors (explications)
+ *
+ * Règles produit :
+ * - “Action Requise” si score >= threshold (niveau UI = "CRITIQUE")
+ * - Sinon : niveau = LOW/MEDIUM/HIGH selon risk_level backend
+ */
+
+// Deux scénarios “métier”
 type ScenarioType = "NORMAL" | "FRAUD";
 
 type TxCreateResponse = {
@@ -36,7 +64,11 @@ type ScoreResponse = {
   };
 };
 
-// ✅ Transaction backend + champ UI "risk"
+/**
+ * TransactionWithRisk
+ * - Type UI : on garde Transaction (types.ts) + on ajoute un bloc `risk` pour l’affichage.
+ * - `level: "CRITIQUE"` est volontairement spécifique UI (déclenche “Action Requise”).
+ */
 type TransactionWithRisk = Transaction & {
   risk?: {
     score: number;
@@ -45,45 +77,55 @@ type TransactionWithRisk = Transaction & {
   };
 };
 
+// ✅ une seule source de vérité: VITE_API_URL
 const API_URL =
   (import.meta as any).env?.VITE_API_URL?.toString()?.replace(/\/+$/, "") ||
   "http://127.0.0.1:8000";
 
-/** --- helpers --- */
+/**
+ * isoNowPlusMinutes(deltaMinutes)
+ * - Génère un ISO timestamp “crédible” autour de maintenant (jitter).
+ * - Objectif : éviter des scénarios trop “figés” en démo.
+ */
 function isoNowPlusMinutes(deltaMinutes: number) {
   const d = new Date(Date.now() + deltaMinutes * 60 * 1000);
   return d.toISOString();
 }
 
+/** pick(arr) : tire un élément au hasard (variabilité de démo) */
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+/** rand(min, max) : nombre aléatoire uniforme */
 function rand(min: number, max: number): number {
   return Math.random() * (max - min) + min;
 }
 
+/** chance(p) : true avec probabilité p */
 function chance(p: number): boolean {
   return Math.random() < p;
 }
 
+/** round2(n) : arrondi à 2 décimales (montants crédibles) */
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
 /**
- * 🎯 Niveau 1 : Démo "plus réelle"
- * - payload NON statique
- * - variations réalistes : merchant, arrondissement, montant, online, heure
- * - toujours cohérent avec l’intention (NORMAL vs FRAUD)
+ * buildScenarioPayload(type)
+ * - Construit un payload NON statique mais cohérent avec l’intention :
+ *   - NORMAL : petits montants, commerces “quotidiens”, online peu fréquent
+ *   - FRAUD : montants élevés, ecommerce/électronique, online très fréquent
+ *
+ * ⚠️ Important :
+ * - On conserve des valeurs “compatibles backend” (strings simples, catégories simples)
+ * - Arrondissement : format "750xx" pour rester robuste si le backend parse ce champ
  */
 function buildScenarioPayload(type: ScenarioType) {
-  // ⚠️ Garde des valeurs “compatibles” avec ton back (strings simples)
   const normalMerchants = ["Carrefour City", "Monoprix", "Franprix", "Boulangerie", "SNCF", "Pharmacie"];
   const fraudMerchants = ["Amazon", "Cdiscount", "AliExpress", "Fnac.com", "Deliveroo", "Uber", "Apple Store"];
 
-  // Tu peux choisir soit codes postaux (750xx) soit “Paris 10e”.
-  // Je garde ton format actuel (750xx) pour ne pas casser un éventuel parsing back.
   const arrCodes = [
     "75001",
     "75002",
@@ -110,7 +152,7 @@ function buildScenarioPayload(type: ScenarioType) {
   const normalCategories = ["supermarche", "transport", "restaurant", "pharmacie", "shopping"];
   const fraudCategories = ["ecommerce", "electronics", "luxury", "giftcards", "services"];
 
-  // “Maintenant” avec un petit jitter (ça change l’horodatage, donc plus crédible)
+  // Jitter : donne une impression “live” (transactions pas toutes à la même seconde)
   const jitterMinutes = Math.floor(rand(-180, 10)); // -3h à +10min
   const occurred_at = isoNowPlusMinutes(jitterMinutes);
 
@@ -126,7 +168,6 @@ function buildScenarioPayload(type: ScenarioType) {
     // Suspect = beaucoup plus souvent online
     const is_online = chance(0.85);
 
-    // Description un peu variée
     const descriptions = [
       "achat en ligne montant élevé",
       "transaction ecommerce atypique",
@@ -155,13 +196,7 @@ function buildScenarioPayload(type: ScenarioType) {
   const arrondissement = pick(arrCodes);
   const is_online = chance(0.25);
 
-  const descriptions = [
-    "achat quotidien",
-    "paiement carte",
-    "dépense courante",
-    "achat alimentaire",
-    "transport",
-  ];
+  const descriptions = ["achat quotidien", "paiement carte", "dépense courante", "achat alimentaire", "transport"];
 
   return {
     occurred_at,
@@ -176,11 +211,15 @@ function buildScenarioPayload(type: ScenarioType) {
   };
 }
 
+/**
+ * uiRiskLevelFromBackend(score, threshold, risk_level)
+ * - Harmonise les libellés backend en un niveau UI :
+ *   - si score >= threshold -> "CRITIQUE" (déclenche “Action Requise”)
+ *   - sinon on mappe risk_level en LOW/MEDIUM/HIGH
+ */
 function uiRiskLevelFromBackend(score: number, threshold: number, risk_level: string) {
-  // Ton UI utilise "CRITIQUE" pour déclencher "Action Requise"
   if (score >= threshold) return "CRITIQUE";
 
-  // Sinon on reste proche du backend
   const r = (risk_level || "").toUpperCase();
   if (r.includes("HIGH")) return RiskLevel.HIGH;
   if (r.includes("MEDIUM")) return RiskLevel.MEDIUM;
@@ -188,6 +227,11 @@ function uiRiskLevelFromBackend(score: number, threshold: number, risk_level: st
   return RiskLevel.LOW;
 }
 
+/**
+ * extractErrMsg(err)
+ * - Rend un message d’erreur “présentable” (API / exception / objet).
+ * - Objectif : feedback immédiat en démo sans exposer des stacktraces.
+ */
 function extractErrMsg(err: any): string {
   if (!err) return "Erreur inconnue";
   if (typeof err === "string") return err;
@@ -205,25 +249,29 @@ const Simulator = () => {
   const [lastTx, setLastTx] = useState<TransactionWithRisk | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * handleInject(type)
+   * - Pipeline de démo :
+   *   1) POST /transactions (création DB)
+   *   2) POST /score (scoring + alerte éventuelle)
+   *   3) Fusion en TransactionWithRisk pour affichage
+   */
   const handleInject = async (type: ScenarioType) => {
     setLoading(true);
     setError(null);
 
     try {
-      // 1) Crée une transaction réelle (DB)
       const txPayload = buildScenarioPayload(type);
       const tx = await apiFetch<TxCreateResponse>("/transactions", {
         method: "POST",
         body: JSON.stringify(txPayload),
       });
 
-      // 2) Score la transaction (et crée une alerte si score >= threshold)
       const score = await apiFetch<ScoreResponse>("/score", {
         method: "POST",
         body: JSON.stringify({ transaction_id: tx.id }),
       });
 
-      // 3) Merge en objet UI (Transaction + risk)
       const merged: TransactionWithRisk = {
         ...(tx as Transaction),
         risk: {
@@ -257,7 +305,7 @@ const Simulator = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        {/* Actions */}
+        {/* Actions : 2 scénarios (normal vs suspect) */}
         <div className="space-y-4">
           <h2 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Créer un scénario</h2>
 
@@ -294,7 +342,7 @@ const Simulator = () => {
           )}
         </div>
 
-        {/* Result */}
+        {/* Résultat : une “carte” qui explique la décision */}
         <div className="bg-slate-950 border border-slate-800 rounded-xl p-6 relative min-h-[300px] flex flex-col">
           <h2 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-6">Résultat de l'analyse</h2>
 

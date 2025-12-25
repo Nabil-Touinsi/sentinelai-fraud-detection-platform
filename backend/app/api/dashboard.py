@@ -8,6 +8,14 @@ from app.db.session import get_db
 from app.schemas.dashboard import DashboardSummaryOut
 from app.services.dashboard_service import get_dashboard_summary
 
+"""
+API Dashboard.
+
+Rôle (fonctionnel) :
+- Expose un endpoint de synthèse pour le front (KPI + séries + hotspots).
+- Option simulate : permet d’injecter des transactions récentes pour faire bouger les chiffres en démo.
+"""
+
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 

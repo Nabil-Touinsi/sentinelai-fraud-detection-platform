@@ -1,6 +1,25 @@
 // frontend/types.ts
 
-// ✅ Aligné backend (app/models + endpoints)
+/**
+ * types.ts
+ *
+ * Rôle :
+ * - Centraliser les types partagés du frontend :
+ *   - Modèles alignés sur l’API backend (Transaction, Alert, RiskScore…)
+ *   - Types “UI/legacy” utilisés par certains écrans (ex: FullTransactionData)
+ *   - Helpers de normalisation (statuts, couleurs, pickers robustes)
+ *
+ * Objectif produit :
+ * - Permettre à l’UI d’être stable même si certaines réponses backend varient
+ *   (champs nested vs flat, Decimal en string, statuts différents, etc.).
+ *
+ * ⚠️ Contrat important :
+ * - Scores de risque attendus en 0..100 côté UI (affichage, badges, seuils).
+ * - `arrondissement` est généralement un code de type "75010", mais on garde
+ *   de la tolérance côté UI (parsing / fallback).
+ */
+
+//  Aligné backend (app/models + endpoints)
 export enum RiskLevel {
   LOW = "LOW",
   MEDIUM = "MEDIUM",
@@ -14,6 +33,15 @@ export enum AlertStatus {
 }
 
 // --- Modèles API (backend) ---
+
+/**
+ * Transaction (backend)
+ * - Une opération de paiement/flux à analyser.
+ *
+ * Points d’attention :
+ * - `amount` peut être une string (Decimal côté backend) → l’UI cast au besoin.
+ * - `arrondissement` est un identifiant de zone (ex: "75010") utilisé pour la carte Paris.
+ */
 export interface Transaction {
   id: string;
   occurred_at: string; // ISO
@@ -27,6 +55,13 @@ export interface Transaction {
   description?: string | null;
 }
 
+/**
+ * RiskScore (backend)
+ * - Score calculé par le modèle pour une transaction.
+ *
+ * Hypothèse :
+ * - `score` est attendu en 0..100 (affichage UI).
+ */
 export interface RiskScore {
   id: string;
   transaction_id: string;
@@ -35,6 +70,14 @@ export interface RiskScore {
   created_at: string;
 }
 
+/**
+ * Alert (backend)
+ * - Dossier créé quand un score dépasse le seuil (ou selon règles métier).
+ *
+ * Points d’attention :
+ * - `status` est typé AlertStatus mais on garde `| string` pour tolérer
+ *   d’anciens statuts ("CLOSED", "NEW", etc.).
+ */
 export interface Alert {
   id: string;
   transaction_id: string;
@@ -65,6 +108,13 @@ export interface AlertsListResponse {
   meta: AlertsListMeta;
 }
 
+/**
+ * ScoreResponse (backend)
+ * - Résultat d’un scoring à la demande.
+ *
+ * Utilisation :
+ * - Simulator : crée une transaction puis score → parfois crée une alerte.
+ */
 export interface ScoreResponse {
   transaction_id: string;
   score: number;
@@ -75,7 +125,12 @@ export interface ScoreResponse {
 }
 
 // --- Transactions list (backend/mock) ---
-// Le endpoint /transactions renvoie généralement une liste structurée similaire à /alerts
+
+/**
+ * TransactionListItem
+ * - Format “liste” proche de /alerts :
+ *   transaction + risk_score + éventuelle alert associée.
+ */
 export interface TransactionListItem {
   transaction: Transaction;
   risk_score?: RiskScore | null;
@@ -95,6 +150,11 @@ export interface TransactionsListResponse {
 }
 
 // --- Dashboard ---
+
+/**
+ * DashboardStats (UI)
+ * - KPIs principaux affichés sur le Dashboard.
+ */
 export interface DashboardStats {
   totalTransactionsToday: number;
   openAlerts: number;
@@ -103,7 +163,12 @@ export interface DashboardStats {
 }
 
 // --- Types UI (front) ---
-// Utilisé par Simulator.tsx : on garde Transaction "backend pure" + on ajoute un bloc risk côté UI.
+
+/**
+ * TransactionRiskUI
+ * - Bloc “risk” purement UI :
+ *   - `level` peut être un label custom ("CRITIQUE") en plus des niveaux backend.
+ */
 export type TransactionRiskUI = {
   score: number;
   level: string; // ex: "CRITIQUE" / "OK" (label UI)
@@ -115,8 +180,17 @@ export type TransactionWithRiskUI = Transaction & {
 };
 
 // --- ✅ Legacy type attendu par Transactions.tsx ---
-// Certaines pages Transactions utilisent un format "flat" (ancien UI).
-// On le définit ici pour éviter l'import cassé, puis on migrera la page vers TransactionListItem.
+
+/**
+ * FullTransactionData (legacy)
+ * - Type “souple” utilisé par des écrans historiques (Transactions, Gemini, ParisMap).
+ * - Permet de supporter :
+ *   - réponses flat (ancien mock)
+ *   - réponses nested (backend /alerts, /transactions)
+ *
+ *  Règle produit :
+ * - On conserve ce type tant que tout n’est pas migré vers TransactionListItem.
+ */
 export type FullTransactionData = {
   id: string;
   amount: string | number;
@@ -151,8 +225,16 @@ export type FullTransactionData = {
   risk?: { score: number; factors?: string[] };
 };
 
-
 // --- Helpers UI (exports attendus par le front) ---
+
+/**
+ * normalizeAlertStatus
+ * - Normalise un statut backend/mock vers les 3 états UI.
+ *
+ * Pourquoi :
+ * - Certains écrans reçoivent encore des statuts “historiques” (NEW/CLOSED…).
+ * - On garantit un comportement cohérent des tabs (À traiter / En enquête / Clôturé).
+ */
 export const normalizeAlertStatus = (status?: string | null): AlertStatus => {
   const s = (status || "").toUpperCase().trim();
 
@@ -174,6 +256,13 @@ export const normalizeAlertStatus = (status?: string | null): AlertStatus => {
   return map[s] || AlertStatus.A_TRAITER;
 };
 
+/**
+ * getRiskLabel(level)
+ * - Convertit un niveau de risque (LOW/MEDIUM/HIGH) en libellé humain.
+ *
+ * Impact UI :
+ * - Utilisé pour les chips “Urgent / À vérifier / Normal”.
+ */
 export const getRiskLabel = (level: RiskLevel | string) => {
   const lv = (level || "").toUpperCase();
   if (lv === "HIGH") return "Urgent";
@@ -182,6 +271,13 @@ export const getRiskLabel = (level: RiskLevel | string) => {
   return "Inconnu";
 };
 
+/**
+ * getRiskColor(level)
+ * - Renvoie les classes Tailwind (texte + bg + bordure) selon la criticité.
+ *
+ * Impact UI :
+ * - Style cohérent sur Dashboard / Transactions.
+ */
 export const getRiskColor = (level?: RiskLevel | string) => {
   const lv = (level || "").toUpperCase();
   if (lv === "HIGH") return "text-red-400 bg-red-400/10 border-red-400/20";
@@ -190,6 +286,14 @@ export const getRiskColor = (level?: RiskLevel | string) => {
   return "text-slate-400 bg-slate-400/10 border-slate-400/20";
 };
 
+/**
+ * getCategoryColor(cat)
+ * - Mapping catégorie -> couleur (badge / avatar).
+ *
+ *  Produit :
+ * - Sert à donner un repère visuel rapide (type de commerce).
+ * - Si catégorie inconnue → fallback slate.
+ */
 export const getCategoryColor = (cat: string) => {
   const map: Record<string, string> = {
     ecommerce: "bg-indigo-500",
@@ -210,7 +314,14 @@ export const getCategoryColor = (cat: string) => {
 };
 
 // --- Helpers robustes (mock / backend) ---
-// Permet au Dashboard / UI de fonctionner même si les données sont "flatten" OU "nested".
+
+/**
+ * Pickers “tolérants”
+ * - L’UI consomme parfois :
+ *   - x.alert.status (nested)
+ *   - ou x.status (flat)
+ * - Ces helpers évitent les crashs et uniformisent l’accès aux champs.
+ */
 
 export const pickAlertStatus = (x: any): string =>
   (x?.alert?.status ?? x?.status ?? x?.alert_status ?? "") as string;
@@ -227,21 +338,25 @@ export const pickAlertCreatedAt = (x: any): string =>
 export const pickTransaction = (x: any): Transaction | null =>
   (x?.transaction ?? null) as Transaction | null;
 
-// ✅ Safe pickers pour Transactions UI (évite crash)
+/**
+ * pickTxAmount
+ * - Retourne un montant numérique quel que soit le shape (nested/flat, string/number).
+ *
+ * ✅ Fallback :
+ * - Si parsing impossible → 0 (évite NaN en UI).
+ */
 export const pickTxAmount = (x: any): number => {
-  const raw =
-    x?.transaction?.amount ??
-    x?.amount ??
-    0;
+  const raw = x?.transaction?.amount ?? x?.amount ?? 0;
   const n = typeof raw === "string" ? Number(raw) : Number(raw);
   return Number.isFinite(n) ? n : 0;
 };
 
+/**
+ * pickTxDate
+ * - Date d’occurrence tolérante :
+ *   - backend: transaction.occurred_at
+ *   - legacy: occurred_at / timestamp
+ */
 export const pickTxDate = (x: any): string => {
-  return (
-    x?.transaction?.occurred_at ??
-    x?.occurred_at ??
-    x?.timestamp ??
-    ""
-  );
+  return x?.transaction?.occurred_at ?? x?.occurred_at ?? x?.timestamp ?? "";
 };

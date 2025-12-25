@@ -22,12 +22,24 @@ from app.schemas.alerts import (
     PageMeta,
 )
 
+"""
+API Alertes.
+
+Rôle (fonctionnel) :
+- Lister les alertes (avec transaction + score associés) et pagination/tri.
+- Lister l’historique (events) d’une alerte.
+- Mettre à jour le statut d’une alerte (protégé en mode démo) et tracer l’action :
+  - en base via alert_events
+  - en logs via request_id/actor
+  - en temps réel via WebSocket (si activé)
+"""
+
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 log = logging.getLogger("app.alerts")
 
 
 def _priority_order():
-    # “priorité” = score desc puis date desc
+    # Tri “priorité” : score desc, puis date desc
     return [desc(Alert.score_snapshot), desc(Alert.created_at)]
 
 
@@ -40,9 +52,7 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 async def _safe_broadcast(request: Request, payload: dict) -> None:
-    """
-    Broadcast WS sans faire échouer l'endpoint si WS absent / erreur.
-    """
+    """Envoie un event WS sans faire échouer l’endpoint si le WS n’est pas disponible."""
     try:
         manager = getattr(request.app.state, "ws_manager", None)
         if manager is None:
@@ -73,13 +83,13 @@ async def list_alerts(
     if min_score is not None:
         stmt = stmt.where(Alert.score_snapshot >= min_score)
 
-    # tri
+    # Tri
     if sort_by == "priority":
         stmt = stmt.order_by(*_priority_order())
     else:
         stmt = stmt.order_by(desc(Alert.created_at) if order == "desc" else asc(Alert.created_at))
 
-    # total
+    # Total pour la pagination
     count_stmt = select(func.count()).select_from(Alert)
     if status:
         count_stmt = count_stmt.where(Alert.status == status)
@@ -88,7 +98,7 @@ async def list_alerts(
 
     total = (await db.execute(count_stmt)).scalar_one()
 
-    # pagination
+    # Pagination
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     rows = (await db.execute(stmt)).all()
 
@@ -142,7 +152,6 @@ async def list_alert_events(
     return events
 
 
-# ✅ protégé par API Key (démo)
 @router.patch("/{alert_id}", dependencies=[DemoAuthDep])
 async def patch_alert(
     alert_id: uuid.UUID,
@@ -150,17 +159,18 @@ async def patch_alert(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    # Endpoint protégé (mode démo)
     alert = (await db.execute(select(Alert).where(Alert.id == alert_id))).scalars().first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # ✅ request_id (pour traçabilité)
+    # Identifiant de requête pour la traçabilité (logs + alert_events)
     rid = getattr(request.state, "request_id", None) or str(uuid.uuid4())
 
-    # ✅ actor (Option B : stocké en colonne)
+    # Auteur de l’action (header X-Actor côté front)
     actor = request.headers.get("X-Actor") or "demo_admin"
 
-    # ✅ "pourquoi" obligatoire si clôture
+    # Commentaire obligatoire si clôture
     new_status = payload.status.value
     if new_status == "CLOTURE" and not (payload.comment and payload.comment.strip()):
         raise HTTPException(status_code=422, detail="comment is required when closing an alert")
@@ -176,8 +186,8 @@ async def patch_alert(
             old_status=old_status,
             new_status=alert.status,
             message=payload.comment,
-            actor=actor,          # ✅ Option B
-            request_id=rid,       # ✅ Option B
+            actor=actor,
+            request_id=rid,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -191,7 +201,7 @@ async def patch_alert(
         "updated_at": _iso(alert.updated_at),
     }
 
-    # ✅ log structuré action alerte
+    # Log structuré (corrélation via request_id)
     log.info(
         "alert_status_change",
         extra={
@@ -203,7 +213,7 @@ async def patch_alert(
         },
     )
 
-    # ✅ WS event “status changé”
+    # Event temps réel (si WS actif)
     await _safe_broadcast(
         request,
         {

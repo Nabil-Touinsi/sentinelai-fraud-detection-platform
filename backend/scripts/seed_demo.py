@@ -1,4 +1,3 @@
-# backend/scripts/seed_demo.py
 from __future__ import annotations
 
 import argparse
@@ -21,6 +20,32 @@ from app.models.alert_event import AlertEvent
 from app.models.risk_score import RiskScore
 from app.models.transaction import Transaction
 
+"""
+Script CLI: seed_demo
+
+Rôle (fonctionnel) :
+- Génère des données de démonstration réalistes pour alimenter l’app :
+  - transactions (transactions)
+  - scores (risk_scores)
+  - alertes + historique (alerts, alert_events)
+- Optionnellement, purge les données existantes (--reset) avant de reseed.
+
+Ce script sert uniquement à la démo / au dev :
+- Il n’utilise pas le pipeline de scoring “réel” (ScoringService),
+  il calcule un score via une heuristique locale (compute_risk_score).
+- Il utilise une connexion DB SYNC (DATABASE_URL_SYNC) pour rester simple
+  en exécution script et compatible Alembic.
+
+Paramètres principaux :
+- --n : nombre de transactions
+- --days : fenêtre temporelle (derniers N jours)
+- --threshold : seuil score pour créer une alerte
+- --seed : reproductibilité (random.seed)
+
+Effets attendus :
+- Un dashboard “vivant” avec des séries temporelles et des alertes,
+  sans dépendre d’entrées manuelles ou d’un flux temps réel.
+"""
 
 
 # ---- Données réalistes (FR/Paris-friendly) ----
@@ -49,11 +74,18 @@ ARRONDISSEMENTS = [f"Paris {i}e" for i in range(1, 21)] + [
 
 
 def now_utc() -> datetime:
+    """Timestamp UTC centralisé pour homogénéiser created_at / updated_at."""
     return datetime.now(timezone.utc)
 
 
 def weighted_amount(category: str) -> float:
-    # Montants plausibles par catégorie
+    """
+    Génère un montant plausible par catégorie (distribution gaussienne + garde-fous).
+
+    Objectif :
+- Produire des montants réalistes (course, resto, hôtel...) pour que le dashboard
+  paraisse crédible sans être “parfait”.
+    """
     if category == "grocery":
         return round(max(5, random.gauss(45, 25)), 2)
     if category == "restaurant":
@@ -74,7 +106,16 @@ def weighted_amount(category: str) -> float:
 
 
 def compute_risk_score(amount: float, category: str, is_online: bool, occurred_at: datetime) -> int:
-    # Heuristique simple + bruit : suffisant pour démo
+    """
+    Score “démo” (heuristique simple + bruit).
+
+    Objectif :
+- Avoir une distribution de scores variée (0..100).
+- Déclencher des alertes de façon réaliste (montants, online, nuit, catégories).
+
+Note :
+- Ce scoring est indépendant de ScoringService (c’est volontaire).
+    """
     base = 10
 
     # Montant
@@ -85,7 +126,7 @@ def compute_risk_score(amount: float, category: str, is_online: bool, occurred_a
     elif amount > 80:
         base += 10
 
-    # Catégorie “plus risquée” (ecommerce/electronics)
+    # Catégorie “plus risquée”
     if category in ("electronics", "ecommerce"):
         base += 12
     if category == "hotel":
@@ -95,20 +136,30 @@ def compute_risk_score(amount: float, category: str, is_online: bool, occurred_a
     if is_online:
         base += 10
 
-    # Heures “bizarres” (nuit)
+    # Heures atypiques
     hour = occurred_at.hour
     if hour <= 5:
         base += 12
     elif hour >= 23:
         base += 8
 
-    # Bruit aléatoire
+    # Bruit aléatoire (évite un scoring trop déterministe)
     base += random.randint(-8, 18)
 
     return max(0, min(100, int(base)))
 
 
 def seed(reset: bool, n: int, days: int, alert_threshold: int) -> None:
+    """
+    Génère et insère les données demo.
+
+    Étapes :
+- (option) reset : suppression des tables demo dans l’ordre inverse des FK
+- création de N transactions réparties sur une fenêtre de N jours
+- création d’un RiskScore pour chaque transaction
+- création d’une Alert + AlertEvent si score >= threshold
+- commits par batch pour accélérer
+    """
     engine = create_engine(settings.DATABASE_URL_SYNC, future=True)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
@@ -132,12 +183,12 @@ def seed(reset: bool, n: int, days: int, alert_threshold: int) -> None:
             merchant = random.choice(MERCHANTS[category])
             amount = weighted_amount(category)
 
-            # Occurred date aléatoire sur la fenêtre
+            # occurred_at aléatoire sur la fenêtre
             occurred_at = start + timedelta(
                 seconds=random.randint(0, int((now_utc() - start).total_seconds()))
             )
 
-            # Online : très probable pour ecommerce/subscription, moins sinon
+            # Online : biais par catégorie
             if category in ("ecommerce", "subscription", "electronics"):
                 is_online = random.random() < 0.85
             elif category in ("transport", "hotel", "fashion"):
@@ -245,8 +296,6 @@ def seed(reset: bool, n: int, days: int, alert_threshold: int) -> None:
 
         db.commit()
 
-        # petit résumé
-        total_tx = db.execute(select(Transaction).count()).scalar() if hasattr(select(Transaction), "count") else None
         print("✅ Seed terminé.")
         print(f"   - Transactions ajoutées: {n}")
         print(f"   - Alerts créées (score >= {alert_threshold}): {alerts_count}")
@@ -254,6 +303,7 @@ def seed(reset: bool, n: int, days: int, alert_threshold: int) -> None:
 
 
 def main():
+    """Parse les args CLI puis lance le seed."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--reset", action="store_true", help="Supprime les données demo avant de reseed")
     parser.add_argument("--n", type=int, default=800, help="Nombre de transactions à générer")

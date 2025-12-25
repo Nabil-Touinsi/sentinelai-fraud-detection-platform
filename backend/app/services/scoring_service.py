@@ -11,9 +11,30 @@ from app.models.risk_score import RiskScore
 from app.models.transaction import Transaction
 from app.services.feature_builder import FeatureBuilder
 
+"""
+Scoring Service.
+
+Rôle (fonctionnel) :
+- Calcule un score de risque 0..100 pour une transaction.
+- Combine :
+  - un scoring déterministe par règles (base stable)
+  - un scoring ML optionnel (si un modèle est disponible)
+- Persiste le résultat dans la table risk_scores (1 ligne par transaction, UPSERT).
+
+Principe de fusion règles + ML :
+- Les règles servent de baseline “compréhensible” (factors lisibles).
+- Si le ML est disponible, on garde un comportement conservateur :
+  final_score = max(score_règles, score_ML)
+  -> on évite que le ML “désamorce” un signal de risque détecté par les règles.
+
+Sortie :
+- ScoringResult : score + niveau (LOW/MEDIUM/HIGH) + facteurs + features + version modèle.
+"""
+
 
 @dataclass(frozen=True)
 class ScoringResult:
+    """Résultat de scoring retourné aux endpoints (et utile pour logs / UI)."""
     score: int                 # 0..100
     risk_level: str            # LOW / MEDIUM / HIGH
     factors: List[str]         # explications courtes
@@ -23,8 +44,13 @@ class ScoringResult:
 
 class ScoringService:
     """
-    Scoring déterministe (règles) + option ML.
-    Sauvegarde en DB dans risk_scores (1 ligne par transaction).
+    Service de scoring (règles + ML optionnel) avec persistance.
+
+    Responsabilités :
+    - Construire les features (FeatureBuilder)
+    - Appliquer les règles (explicables)
+    - Appeler le ML si dispo (best-effort)
+    - Sauvegarder dans RiskScore (UPSERT transaction_id unique)
     """
 
     def __init__(
@@ -35,12 +61,18 @@ class ScoringService:
         high_risk_categories: Tuple[str, ...] = ("ecommerce", "electronics", "hotel"),
         high_risk_zones: Tuple[str, ...] = ("Saint-Denis", "Aubervilliers", "Montreuil"),
     ) -> None:
+        # Builder injectable pour tests / variations
         self.feature_builder = feature_builder or FeatureBuilder()
+
+        # Version de fallback (si ML indisponible)
         self.model_version = model_version
+
+        # Config règles (normalisée en lower)
         self.high_risk_categories = tuple(c.lower() for c in high_risk_categories)
         self.high_risk_zones = tuple(z.lower() for z in high_risk_zones)
 
     def _risk_level(self, score: int) -> str:
+        """Bucket simple pour l’UI (LOW / MEDIUM / HIGH)."""
         if score >= 70:
             return "HIGH"
         if score >= 40:
@@ -48,6 +80,14 @@ class ScoringService:
         return "LOW"
 
     def _apply_rules(self, f: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """
+        Applique un set de règles lisibles et renvoie :
+        - score (0..100)
+        - facteurs (liste courte d’explications)
+
+        Objectif :
+        - Avoir des résultats “crédibles” et interprétables, même sans ML.
+        """
         score = 10
         factors: List[str] = []
 
@@ -107,61 +147,67 @@ class ScoringService:
                 score += 10
                 factors.append("Montant très supérieur à la moyenne de la catégorie (7j)")
 
-        # clamp 0..100
+        # Clamp 0..100
         score = max(0, min(100, score))
 
-        # garde seulement 3–5 facteurs lisibles
+        # Garde seulement 3–5 facteurs lisibles
         factors = factors[:5]
         return score, factors
 
     async def score_and_persist(self, db: AsyncSession, tx: Transaction) -> ScoringResult:
+        """
+        Orchestration complète :
+        - build features
+        - compute score (règles + ML optionnel)
+        - persist (UPSERT) dans RiskScore
+        - retourne ScoringResult (utilisé par /score et d’autres flows)
+        """
         features = await self.feature_builder.build(db, tx)
 
-        # 1) Score règles (base)
+        # 1) Score règles (baseline)
         rules_score, rules_factors = self._apply_rules(features)
 
-        # Valeurs par défaut (si ML KO)
+        # Valeurs par défaut (si ML indisponible)
         final_score = rules_score
         final_factors = rules_factors
         final_model_version = self.model_version  # rules_v1 par défaut
 
-        # 2) ML (optionnel) -> on garde le score le PLUS ÉLEVÉ (max)
+        # 2) ML (optionnel) : best-effort
+        # Stratégie conservatrice : on garde le score le plus élevé (max)
         try:
             from app.ml.inference import infer_score
 
             ml = infer_score(features)
             if ml is not None:
-                # robustesse: score int 0..100
+                # Robustesse : score int 0..100
                 ml_score = int(max(0, min(100, getattr(ml, "score", 0))))
 
-                # IMPORTANT: ne pas écraser les règles
+                # IMPORTANT : ne pas “désamorcer” les règles
                 final_score = max(rules_score, ml_score)
 
-                # on ajoute l’info modèle, mais on garde les facteurs règles
+                # On expose l’info modèle, mais on garde les facteurs règles (lisibles)
                 ml_kind = getattr(ml, "kind", "ml")
                 final_factors = ([f"Modèle IA utilisé: {ml_kind}"] + rules_factors)[:5]
 
-                # version modèle ML si dispo, sinon on garde rules_v1
+                # Version modèle ML si dispo, sinon fallback sur version courante
                 final_model_version = getattr(ml, "model_version", final_model_version)
         except Exception:
-            # si un problème ML survient, on garde le scoring règles
+            # En cas de problème ML : scoring règles seulement
             pass
 
         level = self._risk_level(final_score)
 
+        # Payload utile pour audit/debug (stocké dans RiskScore.features)
         payload = {
             "inputs": features,
             "factors": final_factors,
             "risk_level": level,
             "rules_score": rules_score,
-            # utile debug (optionnel)
             "final_score": final_score,
         }
 
-        # ✅ UPSERT : 1 score par transaction (transaction_id est unique)
-        existing = (
-            await db.execute(select(RiskScore).where(RiskScore.transaction_id == tx.id))
-        ).scalars().first()
+        # UPSERT : 1 score par transaction (transaction_id est unique)
+        existing = (await db.execute(select(RiskScore).where(RiskScore.transaction_id == tx.id))).scalars().first()
 
         now = datetime.utcnow()
 
@@ -184,7 +230,6 @@ class ScoringService:
         await db.commit()
         await db.refresh(rs)
 
-        # garde aussi self.model_version cohérent pour le retour
         self.model_version = final_model_version
 
         return ScoringResult(

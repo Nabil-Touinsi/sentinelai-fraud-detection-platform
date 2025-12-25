@@ -7,13 +7,36 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+"""
+Schemas Transactions (Pydantic).
+
+Rôle (fonctionnel) :
+- Définit le contrat HTTP des transactions (création, listing, détail).
+- Fournit une validation stricte côté API pour sécuriser les entrées :
+  - refuse les champs inconnus (extra="forbid")
+  - valide montants / formats / longueurs
+  - parse robuste des dates ISO (compat PowerShell / front)
+  - empêche occurred_at dans le futur (tolérance 2 minutes)
+
+Notes :
+- Ces schémas sont distincts des modèles ORM (app.models.*).
+- from_attributes=True permet de sérialiser directement depuis des objets SQLAlchemy.
+"""
+
 
 def _parse_iso_datetime(value: str) -> datetime:
     """
-    Accepte:
+    Parse robuste de datetime ISO pour compat clients variés.
+
+    Accepte :
     - "2025-12-21T18:48:00Z"
     - "2025-12-21T18:48:00.4600072Z" (7 digits -> tronqué à 6)
     - "2025-12-21T18:48:00.460007+00:00"
+
+    Comportement :
+    - "Z" est converti en "+00:00" pour datetime.fromisoformat
+    - la fraction de secondes est tronquée à 6 digits si nécessaire
+    - si tzinfo absent : UTC par défaut
     """
     s = value.strip()
 
@@ -56,16 +79,18 @@ def _parse_iso_datetime(value: str) -> datetime:
 
 class TransactionCreate(BaseModel):
     """
-    Payload d'entrée : validation stricte (minimum pro).
-    - refuse champs inconnus (extra="forbid")
-    - contraintes (montant, currency, longueurs)
-    - occurred_at : parse ISO string robuste + pas dans le futur (tolérance 2 minutes)
+    Payload de création de transaction.
+
+    Objectifs :
+    - Validation stricte (API contract) : extra="forbid"
+    - Normalisation : amount -> Decimal, currency -> upper, channel -> lower, strip strings
+    - Robustesse date : parse ISO string + pas dans le futur (tolérance 2 minutes)
     """
     model_config = ConfigDict(extra="forbid")
 
     occurred_at: datetime
 
-    # bornes "raisonnables" pour une démo
+    # Bornes “raisonnables” pour une démo
     amount: Decimal = Field(..., gt=Decimal("0"), le=Decimal("1000000"))
 
     # ISO 4217 3 lettres (EUR, USD...) + normalisation en MAJ
@@ -76,7 +101,7 @@ class TransactionCreate(BaseModel):
 
     arrondissement: Optional[str] = Field(default=None, max_length=50)
 
-    # garde string pour compat mais on contraint
+    # Reste un string (compat) mais contraint (ex: "card", "transfer", "mobile_pay"...)
     channel: str = Field(default="card", min_length=2, max_length=30, pattern=r"^[a-z_]+$")
 
     is_online: bool = False
@@ -85,7 +110,7 @@ class TransactionCreate(BaseModel):
     @field_validator("amount", mode="before")
     @classmethod
     def _amount_to_decimal(cls, v: Any) -> Any:
-        # JSON envoie souvent float/int -> on normalise vers Decimal
+        """Normalise amount vers Decimal (les clients envoient souvent int/float)."""
         if isinstance(v, Decimal):
             return v
         if isinstance(v, int):
@@ -105,7 +130,7 @@ class TransactionCreate(BaseModel):
     @field_validator("occurred_at", mode="before")
     @classmethod
     def _occurred_at_parse(cls, v: Any) -> Any:
-        # Autoriser string ISO (PowerShell / front)
+        """Autorise occurred_at au format string ISO (PowerShell / front)."""
         if isinstance(v, str):
             return _parse_iso_datetime(v)
         return v
@@ -113,6 +138,7 @@ class TransactionCreate(BaseModel):
     @field_validator("occurred_at")
     @classmethod
     def _occurred_at_not_future(cls, v: datetime) -> datetime:
+        """Empêche occurred_at dans le futur (tolérance 2 minutes)."""
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
 
@@ -124,6 +150,7 @@ class TransactionCreate(BaseModel):
     @field_validator("currency", mode="before")
     @classmethod
     def _currency_upper(cls, v: Any) -> Any:
+        """Normalise currency en MAJ."""
         if isinstance(v, str):
             return v.strip().upper()
         return v
@@ -131,6 +158,7 @@ class TransactionCreate(BaseModel):
     @field_validator("channel", mode="before")
     @classmethod
     def _channel_lower(cls, v: Any) -> Any:
+        """Normalise channel en minuscule."""
         if isinstance(v, str):
             return v.strip().lower()
         return v
@@ -138,12 +166,14 @@ class TransactionCreate(BaseModel):
     @field_validator("merchant_name", "merchant_category", mode="before")
     @classmethod
     def _strip_strings(cls, v: Any) -> Any:
+        """Strip des champs texte (évite espaces en entrée)."""
         if isinstance(v, str):
             return v.strip()
         return v
 
 
 class RiskScoreOut(BaseModel):
+    """Sortie API pour un RiskScore (score + version + features + date)."""
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -154,6 +184,7 @@ class RiskScoreOut(BaseModel):
 
 
 class AlertOut(BaseModel):
+    """Sortie API minimaliste pour l’alerte associée à une transaction."""
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -165,6 +196,7 @@ class AlertOut(BaseModel):
 
 
 class TransactionOut(BaseModel):
+    """Sortie API pour une transaction (données de base + contexte)."""
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -184,23 +216,27 @@ class TransactionOut(BaseModel):
 
 
 class TransactionListItem(BaseModel):
+    """Élément de liste : transaction + score + alerte (optionnels)."""
     transaction: TransactionOut
     risk_score: Optional[RiskScoreOut] = None
     alert: Optional[AlertOut] = None
 
 
 class PageMeta(BaseModel):
+    """Métadonnées de pagination (page, taille, total)."""
     page: int
     page_size: int
     total: int
 
 
 class TransactionListResponse(BaseModel):
+    """Réponse paginée pour /transactions."""
     data: list[TransactionListItem]
     meta: PageMeta
 
 
 class TransactionDetailResponse(BaseModel):
+    """Réponse détaillée pour /transactions/{id}."""
     transaction: TransactionOut
     risk_score: Optional[RiskScoreOut] = None
     alert: Optional[AlertOut] = None

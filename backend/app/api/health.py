@@ -1,7 +1,17 @@
 ﻿from fastapi import APIRouter
-from ..core.settings import settings
+
+from app.core.settings import settings
+
+"""
+API Health.
+
+Rôle (fonctionnel) :
+- Endpoint simple pour vérifier que l’API répond.
+- Expose quelques infos utiles en démo (env, seuil d’alerte).
+"""
 
 router = APIRouter()
+
 
 @router.get("/health")
 def health():

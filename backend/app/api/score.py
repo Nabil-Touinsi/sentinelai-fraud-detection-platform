@@ -18,6 +18,16 @@ from app.models.alert import Alert
 from app.models.alert_event import AlertEvent
 from app.services.scoring_service import ScoringService
 
+"""
+API Scoring.
+
+Rôle (fonctionnel) :
+- Calcule un score de risque pour une transaction existante.
+- Persiste le score (risk_scores).
+- Si le score dépasse le seuil, crée ou met à jour une alerte (alerts) + son historique (alert_events).
+- Publie des events temps réel via WebSocket (si disponible).
+"""
+
 router = APIRouter(tags=["score"])
 
 
@@ -36,23 +46,20 @@ class ScoreResponse(BaseModel):
 
 
 async def _ws_broadcast(request: Request, payload: dict[str, Any]) -> None:
-    """
-    Broadcast best-effort (ne casse jamais /score si WS indispo).
-    Compatible avec ConnectionManager (broadcast_json).
-    """
+    """Envoie un event WS sans faire échouer l’endpoint si le WS n’est pas disponible."""
     try:
         manager = getattr(request.app.state, "ws_manager", None)
         if not manager:
             return
 
-        # ✅ Rend le payload 100% JSON-safe (datetime/UUID/Decimal…)
+        # Rend le payload compatible JSON (UUID/datetime/Decimal…)
         safe_payload = jsonable_encoder(payload)
 
         if hasattr(manager, "broadcast_json"):
             await manager.broadcast_json(safe_payload)
             return
 
-        # fallback si jamais tu changes de manager plus tard
+        # Fallback si le manager change
         if hasattr(manager, "broadcast"):
             await manager.broadcast(safe_payload)
     except Exception:
@@ -83,7 +90,7 @@ async def score_one(
         .first()
     )
 
-    # WS: score computed
+    # Event WS : score calculé
     await _ws_broadcast(
         request,
         {
@@ -107,7 +114,7 @@ async def score_one(
         )
 
         if existing_alert:
-            # si le snapshot change, log event
+            # Mise à jour du snapshot si le score change
             if existing_alert.score_snapshot != int(res.score):
                 old = existing_alert.score_snapshot
                 existing_alert.score_snapshot = int(res.score)
@@ -125,6 +132,7 @@ async def score_one(
                 )
             alert = existing_alert
         else:
+            # Création d’une nouvelle alerte
             alert = Alert(
                 transaction_id=tx.id,
                 risk_score_id=rs.id,
@@ -135,7 +143,7 @@ async def score_one(
                 updated_at=datetime.utcnow(),
             )
             db.add(alert)
-            await db.flush()  # obtenir alert.id
+            await db.flush()  # récupère alert.id
 
             db.add(
                 AlertEvent(
@@ -162,7 +170,7 @@ async def score_one(
             }
         )
 
-        # WS: alert created (ou upsert)
+        # Event WS : alerte créée / mise à jour
         await _ws_broadcast(
             request,
             {

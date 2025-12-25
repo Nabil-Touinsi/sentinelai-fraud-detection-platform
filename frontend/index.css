@@ -1,5 +1,23 @@
-/* Minimal stylesheet to satisfy index.html link */
-html, body {
+/* frontend/index.css */
+
+/**
+ * index.css
+ *
+ * Rôle :
+ * - Fournir une base CSS minimale pour que l’app occupe toute la hauteur
+ *   (layout sidebar + pages scrollables).
+ *
+ * Pourquoi :
+ * - Sans height: 100%, certaines mises en page basées sur h-screen / min-h-screen
+ *   peuvent se comporter différemment selon le navigateur.
+ * - margin: 0 évite le “bord blanc” par défaut du navigateur.
+ *
+ * ✅ Note :
+ * - Le styling principal est géré par Tailwind (classes dans les composants).
+ * - Ce fichier reste volontairement léger.
+ */
+html,
+body {
   height: 100%;
   margin: 0;
 }

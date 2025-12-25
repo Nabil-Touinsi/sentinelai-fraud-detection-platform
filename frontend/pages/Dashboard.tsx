@@ -7,6 +7,29 @@ import { CheckCircle2, Clock, AlertTriangle, Activity, MapPin } from "lucide-rea
 import { useNavigate } from "react-router-dom";
 import { apiFetch } from "../services/api";
 
+/**
+ * Page Dashboard (Tableau de bord)
+ *
+ * Rôle :
+ * - Vue “pilotage” : KPIs + tâches urgentes + courbe + heatmap Paris.
+ * - Agrège plusieurs sources backend pour donner une lecture opérationnelle :
+ *   - /dashboard/summary : KPIs, séries temporelles, hotspots
+ *   - /alerts : liste des alertes pour construire la todo + stats de clôture
+ *   - /system/status : état santé (DB/WS/threshold/version)
+ *
+ * Données attendues :
+ * - DashboardSummary (summary) fournit :
+ *   - séries journalières (transactions/alertes)
+ *   - hotspots par arrondissements (count)
+ * - Alerts fournit :
+ *   - created_at / updated_at / status (pour calculer durée de traitement)
+ *
+ * Règles produit :
+ * - “À faire maintenant” = alertes non clôturées, triées par score snapshot puis date
+ * - Heatmap Paris : couleurs basées sur le volume (quantiles), pulse possible si risque élevé
+ * - ✅ Simulateur : ajoute des données “artificielles” au backend → désactivé par défaut
+ */
+
 /** ✅ Local type (car pas exporté de types.ts chez toi) */
 type DashboardStats = {
   totalTransactionsToday: number;
@@ -66,6 +89,11 @@ type SystemStatus = {
   [k: string]: any;
 };
 
+/**
+ * computeSystemOk(status)
+ * - Interprète /system/status de façon tolérante (formats variables).
+ * - Objectif : alimenter un badge “Opérationnel / Dégradé” sans dépendre d’un seul schéma.
+ */
 function computeSystemOk(s: SystemStatus | null): boolean {
   if (!s) return false;
 
@@ -104,6 +132,11 @@ function computeSystemOk(s: SystemStatus | null): boolean {
   return Boolean(dbOk && wsOk);
 }
 
+/**
+ * formatTs(status)
+ * - Affiche une heure lisible depuis /system/status (timestamp ou ts).
+ * - Utilisé uniquement à des fins d’information UI (“dernière mise à jour”).
+ */
 function formatTs(s: SystemStatus | null): string | null {
   const raw = s?.timestamp || s?.ts;
   if (!raw) return null;
@@ -113,19 +146,18 @@ function formatTs(s: SystemStatus | null): string | null {
 }
 
 /**
- * ✅ Snapshot compatible:
- * - si backend renvoie 0..100 → on garde
- * - si ça renvoie 0..1 (score normalisé) → on convertit en 0..100
+ * getSnapshot(alert)
+ * - Retourne un score “lisible” en 0..100 à partir de formats backend/legacy variés.
+ * - ✅ Compat :
+ *   - si backend renvoie 0..100 → on garde
+ *   - si ça renvoie 0..1 (score normalisé) → on convertit en 0..100
  */
 function getSnapshot(a: any): number {
   const v = a?.score_snapshot ?? a?.risk_score_snapshot ?? a?.riskScoreSnapshot ?? a?.risk?.score ?? a?.riskScore;
   const n = typeof v === "string" ? Number(v) : v;
   if (!Number.isFinite(n)) return 0;
 
-  // si c'est un score normalisé
   if (n > 0 && n <= 1) return Math.round(n * 100);
-
-  // score déjà en pourcentage
   return n;
 }
 
@@ -135,14 +167,17 @@ function isClosedStatus(status: any): boolean {
   return s === "CLOTURE" || s === "CLOSED";
 }
 
+/**
+ * toZoneParis(value)
+ * - Convertit une clé hotspot (“75008”, “Paris 8”, “8”) en arrondissement 1..20.
+ * - Retourne null si non reconnu (on ignore la ligne pour la carte).
+ */
 function toZoneParis(arr: any): number | null {
   const s = String(arr ?? "").trim();
-  // attendu: "75008", "75010", etc.
   if (s.length === 5 && s.startsWith("75")) {
     const z = parseInt(s.slice(-2), 10);
     if (Number.isFinite(z) && z >= 1 && z <= 20) return z;
   }
-  // fallback: "8" ou "Paris 8"
   const m = s.match(/(\d{1,2})$/);
   if (m) {
     const z = parseInt(m[1], 10);
@@ -151,6 +186,11 @@ function toZoneParis(arr: any): number | null {
   return null;
 }
 
+/**
+ * computeAvgResolutionMinutes(alertItems)
+ * - Temps moyen de traitement basé sur created_at → updated_at (sur alertes clôturées).
+ * - Utilisé pour le KPI “Temps moy. traitement”.
+ */
 function computeAvgResolutionMinutes(alertItems: any[]): number {
   const closed = alertItems.filter((x) => isClosedStatus(x?.status));
   if (closed.length === 0) return 0;
@@ -169,6 +209,11 @@ function computeAvgResolutionMinutes(alertItems: any[]): number {
   return n ? Math.round(sum / n) : 0;
 }
 
+/**
+ * computeAvgResolutionMinutesSince(alertItems, sinceMs)
+ * - Variante “fenêtre temporelle” (ex: 24h) pour mesurer une tendance récente.
+ * - On retourne aussi le nombre d’alertes clôturées prises en compte.
+ */
 function computeAvgResolutionMinutesSince(
   alertItems: any[],
   sinceMs: number
@@ -197,6 +242,11 @@ function computeAvgResolutionMinutesSince(
   return { avgMinutes: n ? Math.round(sum / n) : 0, count: n };
 }
 
+/**
+ * formatDuration(minutes)
+ * - Format court pour KPI (min / h / jours).
+ * - ⚠️ Coupe à >7j pour éviter des valeurs illisibles en UI.
+ */
 function formatDuration(mins: number): string {
   if (!Number.isFinite(mins) || mins <= 0) return "—";
 
@@ -217,7 +267,11 @@ function formatDuration(mins: number): string {
   return rh ? `${d}j ${rh}h` : `${d}j`;
 }
 
-// --- Helpers pour “calme / moyen / chaud” (quantiles) ---
+/**
+ * quantile(sorted, q)
+ * - Calcule un quantile q sur un tableau TRIÉ (interpolation linéaire).
+ * - Utilisé pour découper “calme / moyen / chaud” dans la heatmap.
+ */
 function quantile(sorted: number[], q: number): number {
   if (!sorted.length) return 0;
   const pos = (sorted.length - 1) * q;
@@ -251,10 +305,21 @@ const Dashboard = () => {
   const [sysOk, setSysOk] = useState<boolean>(false);
   const [sysError, setSysError] = useState<string | null>(null);
 
-  // ✅ Simulateur (toggle + intensité)
-  const [simulateOn, setSimulateOn] = useState<boolean>(true);
+  // ✅ Simulateur (toggle + intensité) — OFF par défaut
+  const [simulateOn, setSimulateOn] = useState<boolean>(false);
   const [simulateN, setSimulateN] = useState<number>(3);
 
+  /**
+   * refreshData()
+   * - Récupère summary + alerts et construit :
+   *   - KPIs
+   *   - todo (urgentAlerts)
+   *   - série pour le graphe
+   *   - données “mapTx” compatibles ParisMap (count + risk.score)
+   *
+   * ✅ Note :
+   * - Si simulateur ON, on passe simulate=true/simulate_n au backend (données artificielles).
+   */
   const refreshData = async () => {
     try {
       const qs = new URLSearchParams({
@@ -272,6 +337,7 @@ const Dashboard = () => {
       const alertsResp = await apiFetch<any>("/alerts?page=1&page_size=200");
       const items = Array.isArray(alertsResp) ? alertsResp : alertsResp?.data ?? [];
 
+      // Aplatit la réponse (alert + tx + risk_score) en structure utilisable partout
       const flatAlerts = items.map((it: any) => {
         const alert = it?.alert ?? it;
         const tx = it?.transaction ?? it?.tx ?? {};
@@ -304,6 +370,7 @@ const Dashboard = () => {
       };
       setStats(s);
 
+      // Todo : alertes ouvertes triées par score, puis par fraîcheur
       setUrgentAlerts(
         flatAlerts
           .filter((a: any) => !isClosedStatus(a?.status))
@@ -315,6 +382,7 @@ const Dashboard = () => {
           .slice(0, 5)
       );
 
+      // Graphe : 12 derniers jours (format mm-dd)
       const last12 = days.slice(-12);
       setChartData(
         last12.map((p) => ({
@@ -323,7 +391,17 @@ const Dashboard = () => {
         }))
       );
 
-      // ✅ MAP: on force une échelle avec VERT (0..1) + on fournit aussi 0..100 en fallback
+      /**
+       * MAP (ParisMap)
+       * - On convertit les hotspots arrondissement en “transactions” compat :
+       *   - zone_paris: 1..20
+       *   - count: volume réel
+       *   - risk.score: 0..1 (pour réactiver du vert/orange/rouge dans ParisMap)
+       *
+       * Logique couleur :
+       * - calme/moyen/chaud par quantiles sur count (q33/q66)
+       * - score01 = score100/100 pour être compatible avec getSnapshot et les fallbacks
+       */
       const arrs = summary?.hotspots?.arrondissements ?? [];
       const counts = arrs
         .map((h) => Number(h.count ?? 0))
@@ -341,8 +419,7 @@ const Dashboard = () => {
 
           const c = Number(h.count ?? 0);
 
-          // calme/moyen/chaud par volume (quantiles)
-          const base100 = c <= q33 ? 10 : c <= q66 ? 55 : 92; // => vert / orange / rouge
+          const base100 = c <= q33 ? 10 : c <= q66 ? 55 : 92; // vert / orange / rouge
           const boost100 = max > 0 ? Math.round((c / max) * 6) : 0; // petite nuance
           const score100 = clamp(base100 + boost100, 0, 100);
           const score01 = clamp(score100 / 100, 0, 1);
@@ -351,11 +428,10 @@ const Dashboard = () => {
             id: `hotspot-${zone}`,
             amount: 0,
             zone_paris: zone,
-            count: c, // on garde le vrai chiffre affiché
-            // ✅ pour la couleur: si ParisMap lit risk.score (0..1) => on a enfin du vert
+            count: c,
             risk: { score: score01, score_pct: score100 },
 
-            // ✅ fallbacks fréquents dans les maps/tiles (si ParisMap lit ces champs)
+            // fallbacks (si d'autres composants lisent ces champs)
             score_snapshot: score100,
             risk_score_snapshot: score100,
             riskScoreSnapshot: score100,
@@ -370,6 +446,12 @@ const Dashboard = () => {
     }
   };
 
+  /**
+   * refreshSystemStatus()
+   * - Récupère /system/status pour alimenter :
+   *   - badge “Système Opérationnel / Dégradé”
+   *   - seuil d’alerte affiché (si fourni)
+   */
   const refreshSystemStatus = async () => {
     try {
       setSysError(null);
@@ -388,6 +470,7 @@ const Dashboard = () => {
     refreshData();
     refreshSystemStatus();
 
+    // Rafraîchissement léger : dashboard “vivant” sans dépendre uniquement du temps réel
     const intervalData = setInterval(refreshData, 10000);
     const intervalSys = setInterval(refreshSystemStatus, 10000);
 
@@ -405,7 +488,7 @@ const Dashboard = () => {
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
-      {/* Header Status */}
+      {/* Header : état système + simulateur + infos API */}
       <div className="flex items-center justify-between bg-slate-900/50 p-4 rounded-xl border border-slate-800">
         <div>
           <h1 className="text-xl font-semibold text-white">Bonjour, Jean</h1>
@@ -436,7 +519,7 @@ const Dashboard = () => {
 
           <div className="h-8 w-[1px] bg-slate-700"></div>
 
-          {/* ✅ Simulateur */}
+          {/* ✅ Simulateur : OFF par défaut (données artificielles côté backend) */}
           <div className="flex items-center gap-2">
             <label className="text-xs text-slate-400 flex items-center gap-2 select-none">
               <input
@@ -485,7 +568,7 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* 4 KPIs Métier */}
+      {/* KPIs : lecture rapide (métier) */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <KpiCard
           label="Transactions du jour"
@@ -504,8 +587,6 @@ const Dashboard = () => {
           icon={<AlertTriangle size={18} className="text-red-400" />}
           isUrgent={stats.criticalAlerts > 0}
         />
-
-        {/* ✅ KPI: grande écriture seulement */}
         <KpiCard
           label="Temps moy. traitement"
           value={formatDuration(stats.avgResolutionTimeMinutes)}
@@ -514,7 +595,7 @@ const Dashboard = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* To Do List */}
+        {/* Colonne gauche : todo + graphe */}
         <div className="lg:col-span-2 flex flex-col gap-4">
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-blue-500"></span>À faire maintenant
@@ -609,7 +690,7 @@ const Dashboard = () => {
             )}
           </div>
 
-          {/* Graph */}
+          {/* Graphe : volume d’alertes (12 jours) */}
           <div className="mt-4">
             <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
               Volume des alertes (12 derniers jours)
@@ -633,14 +714,21 @@ const Dashboard = () => {
                     itemStyle={{ color: "#fff" }}
                     cursor={{ stroke: "#334155" }}
                   />
-                  <Area type="monotone" dataKey="count" stroke="#ef4444" strokeWidth={2} fillOpacity={1} fill="url(#colorAlerts)" />
+                  <Area
+                    type="monotone"
+                    dataKey="count"
+                    stroke="#ef4444"
+                    strokeWidth={2}
+                    fillOpacity={1}
+                    fill="url(#colorAlerts)"
+                  />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
           </div>
         </div>
 
-        {/* Right Column */}
+        {/* Colonne droite : heatmap Paris */}
         <div className="flex flex-col gap-6">
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 h-full flex flex-col">
             <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center justify-between">
@@ -663,6 +751,11 @@ const Dashboard = () => {
   );
 };
 
+/**
+ * KpiCard
+ * - Carte KPI générique (valeur + label + icône).
+ * - `isUrgent` colore en rouge (priorité), `highlight` en ambre (attention).
+ */
 const KpiCard = ({ label, value, icon, highlight, isUrgent, sub }: any) => (
   <div
     className={`p-5 rounded-xl border flex flex-col justify-between min-h-[96px] ${

@@ -1,1 +1,92 @@
-Generic single-database configuration.
+# Alembic – Gestion des migrations de base de données
+
+## Rôle d’Alembic dans le projet
+
+Alembic est l’outil utilisé pour gérer **l’évolution du schéma de la base de données** dans le temps.  
+Il permet de versionner les changements de structure (tables, colonnes, index, relations) de manière
+contrôlée et reproductible.
+
+Dans ce projet, Alembic est utilisé conjointement avec **SQLAlchemy**.
+
+---
+
+## Principe général
+
+Chaque modification du schéma de la base de données est décrite dans un fichier de migration.
+Ces fichiers sont stockés dans le dossier :
+
+**alembic/versions/**
+
+Chaque migration contient :
+- une fonction `upgrade()` : applique le changement
+- une fonction `downgrade()` : permet un retour arrière
+
+Les migrations sont exécutées **dans l’ordre**, selon leur identifiant (`revision` / `down_revision`).
+
+---
+
+## Organisation du dossier
+
+alembic/
+├── env.py
+├── script.py.mako
+├── versions/
+│ ├── 9323b707b05f_init_alembic.py
+│ ├── 1fe285a86c40_create_transactions_risk_scores_alerts.py
+│ ├── 08fba70deb76_cleanup_redundant_indexes.py
+│ └── 3b1c7a9e2d11_add_actor_request_id_to_alert_events.py
+
+
+### `env.py`
+- Configure Alembic (connexion à la base, métadonnées SQLAlchemy).
+- Charge les modèles (`app.models`) pour permettre la comparaison automatique du schéma.
+- Gère les migrations en mode **offline** (génération SQL) ou **online** (exécution directe).
+
+### `versions/`
+Contient l’historique des migrations, chacune correspondant à une étape précise du schéma.
+
+---
+
+## Description des migrations existantes
+
+### `9323b707b05f_init_alembic.py`
+Migration initiale.
+- Sert de point de départ à l’historique Alembic.
+- Ne modifie pas le schéma.
+
+### `1fe285a86c40_create_transactions_risk_scores_alerts.py`
+Création des tables cœur du projet :
+- `transactions` : opérations brutes
+- `risk_scores` : scores de risque (1 par transaction)
+- `alerts` : alertes générées à partir des scores
+- `alert_events` : historique des actions sur les alertes
+
+Cette migration pose les bases fonctionnelles du système de détection.
+
+### `08fba70deb76_cleanup_redundant_indexes.py`
+Migration de maintenance.
+- Suppression d’index redondants.
+- Aucun impact fonctionnel, uniquement performance et propreté du schéma.
+
+### `3b1c7a9e2d11_add_actor_request_id_to_alert_events.py`
+Ajout de champs de traçabilité :
+- `actor` : auteur de l’action
+- `request_id` : identifiant de requête
+
+Permet l’audit et le suivi précis des actions sur les alertes.
+
+---
+
+## Commandes principales
+
+# Appliquer toutes les migrations
+alembic upgrade head
+
+# Revenir d’une migration
+alembic downgrade -1
+
+# Voir l’historique des migrations
+alembic history
+
+# Voir la version actuelle
+alembic current

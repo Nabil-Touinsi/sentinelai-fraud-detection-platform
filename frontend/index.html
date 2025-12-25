@@ -2,18 +2,50 @@
 <html lang="fr">
   <head>
     <meta charset="UTF-8" />
+
+    <!--
+      favicon
+      - Icone par défaut Vite (démo).
+      - Peut être remplacée plus tard par une icône “Sentinel”.
+    -->
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+
+    <!--
+      viewport
+      - Responsive mobile / desktop : évite un zoom implicite sur mobile.
+    -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!--
+      title
+      - Titre de l’onglet navigateur (identité produit).
+    -->
     <title>Sentinel | Gestion des Risques</title>
 
+    <!--
+      Tailwind via CDN
+      - Choix simple pour une démo / POC : pas de build Tailwind côté Vite.
+      - Les composants utilisent les classes Tailwind comme source de style principale.
+      ⚠️ En production, on préférerait souvent un build Tailwind (perf + purge CSS).
+    -->
     <script src="https://cdn.tailwindcss.com"></script>
 
     <style>
+      /**
+       * Base UI
+       * - Couleurs globales alignées avec le thème (slate/bleu).
+       * - Sert de “fallback” même si certaines pages n’appliquent pas de background.
+       */
       body {
         background-color: #0f172a; /* Slate 900 */
         color: #e2e8f0; /* Slate 200 */
       }
-      /* Custom Scrollbar */
+
+      /**
+       * Scrollbar (cosmétique)
+       * - Rendu plus cohérent avec une app “console / backoffice”.
+       * - WebKit-only (Chrome/Edge/Safari), sans impact fonctionnel.
+       */
       ::-webkit-scrollbar {
         width: 8px;
         height: 8px;
@@ -30,11 +62,24 @@
       }
     </style>
 
+    <!--
+      CSS minimal local
+      - Assure notamment height: 100% et margin: 0 (layout full height).
+    -->
     <link rel="stylesheet" href="/index.css" />
   </head>
 
   <body>
+    <!--
+      Root React
+      - Point de montage unique de l’application.
+    -->
     <div id="root"></div>
+
+    <!--
+      Entrée Vite
+      - Bootstrapping React / Router / pages.
+    -->
     <script type="module" src="/index.tsx"></script>
   </body>
 </html>

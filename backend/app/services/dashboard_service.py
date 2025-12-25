@@ -1,4 +1,3 @@
-# backend/app/services/dashboard_service.py
 from __future__ import annotations
 
 import random
@@ -22,6 +21,26 @@ from app.schemas.dashboard import (
 )
 from app.services.scoring_service import ScoringService
 
+"""
+Dashboard Service.
+
+Rôle (fonctionnel) :
+- Calcule la “vue agrégée” du dashboard (1 endpoint = 1 payload complet) :
+  - KPI (compteurs / stats globales)
+  - séries temporelles (par jour)
+  - hotspots (arrondissements / catégories / marchands)
+
+Optionnel :
+- Mode simulation : injecte des transactions “live” puis les score, afin que les chiffres bougent
+  sans dépendre d’une source externe. Utile en démo / local.
+
+Notes :
+- L’objectif est que le front consomme un objet stable (DashboardSummaryOut) sans assembler
+  plusieurs endpoints.
+- Le heatmap arrondissements renvoie toujours 1..20 (même si count=0) pour conserver l’affichage
+  “calme / moyen / chaud” sur la carte.
+"""
+
 # -----------------------------
 # Helpers (arrondissements)
 # -----------------------------
@@ -29,6 +48,7 @@ _ARR_RE = re.compile(r"(\d{1,2})")
 
 
 def _parse_arr_num(value: Optional[str]) -> Optional[int]:
+    """Extrait un numéro 1..20 depuis une valeur texte (ex: '75011', '11e', '11')."""
     if not value:
         return None
     m = _ARR_RE.search(str(value))
@@ -39,10 +59,12 @@ def _parse_arr_num(value: Optional[str]) -> Optional[int]:
 
 
 def _arr_label(n: int) -> str:
+    """Libellé d’arrondissement (format côté UI)."""
     return str(n)
 
 
 def _date_range(days: int) -> Tuple[datetime, List[date]]:
+    """Retourne (start_dt UTC, liste des dates inclusives) sur les N derniers jours."""
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days)
     start_date = start.date()
@@ -53,6 +75,7 @@ def _date_range(days: int) -> Tuple[datetime, List[date]]:
 # -----------------------------
 # Simulator (transactions live)
 # -----------------------------
+# Catégories simulées (variées) pour rendre les listes/graphes crédibles en démo
 _SIM_CATEGORIES = [
     "ecommerce", "electronics", "hotel", "groceries", "restaurant", "travel", "pharmacy", "fuel",
     "luxury", "fashion", "beauty", "sports", "entertainment", "streaming", "gaming", "subscriptions",
@@ -72,7 +95,7 @@ _SIM_CATEGORIES = [
     "international_transfer", "remittance",
 ]
 
-# Liste fallback (si une catégorie n'est pas mappée)
+# Marchands fallback (si catégorie non mappée)
 _SIM_MERCHANTS = [
     "Monoprix", "Carrefour", "Auchan", "Intermarché", "Leclerc", "Franprix", "Casino", "Picard",
     "FNAC", "Darty", "Boulanger", "Cdiscount", "Amazon", "Apple Store", "Samsung Store",
@@ -92,7 +115,7 @@ _SIM_MERCHANTS = [
     "Tabac Presse", "PMU", "FDJ",
 ]
 
-# ✅ NOUVEAU : mapping cohérent catégorie -> marchands possibles
+# Mapping cohérent : catégorie -> marchands possibles (meilleure crédibilité démo)
 _SIM_MERCHANTS_BY_CAT: Dict[str, List[str]] = {
     # --- e-commerce / digital
     "ecommerce": ["Amazon", "Cdiscount", "AliExpress", "Fnac.com", "Apple Store", "Samsung Store"],
@@ -183,13 +206,16 @@ _SIM_MERCHANTS_BY_CAT: Dict[str, List[str]] = {
     "photography": ["FNAC", "Darty"],
 }
 
+# Canaux simulés (si non online)
 _SIM_CHANNELS = ["card_present", "online", "mobile", "transfer"]
 
 
 def _pick_merchant_for_category(cat: str) -> str:
     """
     Choisit un marchand cohérent avec la catégorie.
-    Fallback sur _SIM_MERCHANTS si la catégorie n'est pas mappée.
+
+    - Si la catégorie est mappée : choix dans la pool dédiée.
+    - Sinon : fallback sur une liste générique.
     """
     pool = _SIM_MERCHANTS_BY_CAT.get(cat)
     if pool:
@@ -199,13 +225,18 @@ def _pick_merchant_for_category(cat: str) -> str:
 
 async def _score_and_maybe_alert(db: AsyncSession, tx: Transaction, *, threshold: int) -> None:
     """
-    Score (UPSERT risk_scores) via ScoringService.score_and_persist
-    + crée une alerte si score >= threshold.
+    Pipeline “démo live” :
+    - Score la transaction via ScoringService (upsert risk_scores).
+    - Crée ou met à jour une alerte si score >= threshold.
+
+    Notes :
+    - On respecte la contrainte 1 alerte max par risk_score (unique=True côté modèle Alert).
+    - Pas d’historique ici : ce helper vise la simplicité pour “faire bouger” le dashboard.
     """
     scoring = ScoringService()
     result = await scoring.score_and_persist(db, tx)
 
-    # retrouver le RiskScore upserté (1:1 avec transaction)
+    # Retrouver le RiskScore upserté (1:1 avec transaction)
     rs = (
         (await db.execute(select(RiskScore).where(RiskScore.transaction_id == tx.id)))
         .scalars()
@@ -224,12 +255,13 @@ async def _score_and_maybe_alert(db: AsyncSession, tx: Transaction, *, threshold
 
         now = datetime.now(timezone.utc)
         if existing:
-            # maj snapshot si le score change
+            # Mise à jour snapshot si le score change
             if int(existing.score_snapshot) != int(result.score):
                 existing.score_snapshot = int(result.score)
                 existing.updated_at = now
                 db.add(existing)
         else:
+            # Création d’une alerte
             alert = Alert(
                 transaction_id=tx.id,
                 risk_score_id=rs.id,
@@ -252,8 +284,11 @@ async def _simulate_transactions(
     threshold: int,
 ) -> int:
     """
-    Insère n transactions "live" (occurred_at proche de now), score, et génère alertes si besoin.
-    ✅ merchant_name est maintenant cohérent avec merchant_category.
+    Génère des transactions “live” pour la démo.
+
+    - Insère n transactions (occurred_at proche de now).
+    - Score chaque transaction et déclenche des alertes si nécessaire.
+    - merchant_name est choisi de façon cohérente avec merchant_category.
     """
     if n <= 0:
         return 0
@@ -264,20 +299,18 @@ async def _simulate_transactions(
     for _ in range(n):
         arr = random.randint(1, 20)
 
-        # ✅ on choisit d'abord la catégorie
+        # On choisit d'abord la catégorie, puis un marchand cohérent
         cat = random.choice(_SIM_CATEGORIES)
-
-        # ✅ puis un marchand cohérent avec cette catégorie
         merchant = _pick_merchant_for_category(cat)
 
         # Montant de base
         base_amount = random.uniform(5, 250)
 
-        # Ajustements par catégories "chères"
+        # Ajustements par catégories “chères”
         if cat in {"electronics", "hotel", "travel", "luxury", "car_rental"}:
             base_amount *= random.uniform(2.5, 10)
 
-        # Ajustements par merchants "chers"
+        # Ajustements par marchands “chers”
         if merchant in {"Apple Store", "Amazon", "Booking.com", "Air France", "Hertz", "Avis"}:
             base_amount *= random.uniform(1.2, 2.3)
 
@@ -334,9 +367,12 @@ async def get_dashboard_summary(
     alert_threshold: int = 70,
 ) -> DashboardSummaryOut:
     """
-    Summary = KPI + série + hotspots.
-    - Heatmap vivante: arrondissements renvoie TOUJOURS 1..20 (même si 0).
-    - Simulateur: injecte des transactions live -> score -> alertes => chiffres bougent réellement.
+    Construit le payload DashboardSummaryOut (KPI + séries + hotspots).
+
+    Comportement :
+    - Si simulate=True : injecte des transactions live avant de calculer les agrégats.
+    - Heatmap vivante : arrondissements renvoie toujours 1..20 (même si 0),
+      afin que la carte conserve les zones “calme/moyen/chaud”.
     """
     if simulate:
         await _simulate_transactions(db, n=simulate_n, threshold=alert_threshold)
@@ -430,7 +466,7 @@ async def get_dashboard_summary(
     )
     arr_rows = (await db.execute(arr_stmt)).all()
 
-    # On garantit 1..20 pour garder la carte "calme/moyen/chaud"
+    # On garantit 1..20 pour garder la carte “calme/moyen/chaud”
     arr_map: Dict[int, Tuple[int, Optional[float]]] = {i: (0, None) for i in range(1, 21)}
     for r in arr_rows:
         n = _parse_arr_num(r.key)

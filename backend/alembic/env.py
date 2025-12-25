@@ -1,3 +1,12 @@
+"""
+Configuration Alembic.
+
+Rôle (fonctionnel) :
+- Déclare l’URL de base utilisée par Alembic pour exécuter les migrations.
+- Charge les modèles SQLAlchemy pour alimenter Base.metadata.
+- Exécute les migrations en mode offline (génération SQL) ou online (connexion DB).
+"""
+
 from logging.config import fileConfig
 
 from alembic import context
@@ -15,10 +24,12 @@ config.set_main_option("sqlalchemy.url", settings.DATABASE_URL_SYNC)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+# Métadonnées des tables SQLAlchemy (utilisées pour l’autogénération et la comparaison)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
+    # Mode offline : Alembic génère les instructions SQL sans se connecter à la DB
     url = settings.DATABASE_URL_SYNC
     context.configure(
         url=url,
@@ -33,6 +44,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    # Mode online : Alembic se connecte à la DB et applique les migrations
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

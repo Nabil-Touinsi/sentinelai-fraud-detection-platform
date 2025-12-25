@@ -4,16 +4,38 @@ import { apiFetch } from "../services/api";
 import type { Transaction, RiskScore, Alert } from "../types";
 import { RiskLevel, getRiskLabel, getRiskColor, getCategoryColor } from "../types";
 import { explainRiskWithGemini } from "../services/gemini";
-import {
-  X,
-  ChevronRight,
-  Bot,
-  Check,
-  AlertCircle,
-  CreditCard,
-  Smartphone,
-  Globe,
-} from "lucide-react";
+import { X, ChevronRight, Bot, Check, AlertCircle, CreditCard, Smartphone, Globe } from "lucide-react";
+
+/**
+ * Page Transactions
+ *
+ * Rôle :
+ * - Affiche une liste paginée (côté backend) des transactions récentes.
+ * - Permet de filtrer rapidement (Tout / Cas urgents / À vérifier).
+ * - Ouvre un panneau de détail (slide-over) pour analyser une transaction :
+ *   - score + niveau (LOW/MEDIUM/HIGH)
+ *   - facteurs (si disponibles)
+ *   - statut “Signalé” si une alerte existe
+ * - Optionnel : demander une explication “pédagogique” via l’assistant (Gemini).
+ *
+ * Données attendues (backend) :
+ * - GET /transactions?page=&page_size=
+ *   -> { data: TransactionListItem[], meta: { page, page_size, total } }
+ * - Chaque item peut contenir :
+ *   - transaction (obligatoire)
+ *   - risk_score (optionnel) : score “officiel” (prioritaire)
+ *   - alert (optionnel) : si la transaction a déclenché un dossier
+ *   - risk (optionnel) : compat legacy / mock (score + facteurs)
+ *
+ * Hypothèses importantes :
+ * - Le score est attendu en 0..100.
+ * - Le backend limite page_size à 100 → on “précharge” 2 pages pour viser ~200 lignes.
+ *
+ * Règles produit :
+ * - Cas urgents : score >= 80
+ * - À vérifier : score >= 50 et < 80
+ * - OK : score < 50
+ */
 
 type TransactionListItem = {
   transaction: Transaction;
@@ -29,6 +51,7 @@ type TransactionListResponse = {
   meta: { page: number; page_size: number; total: number };
 };
 
+/** Seuils UI (simple et lisible) */
 const SUSPICIOUS_MEDIUM = 50;
 const SUSPICIOUS_HIGH = 80;
 
@@ -37,28 +60,53 @@ const PAGE_SIZE_MAX = 100;
 // si tu veux ~200 lignes, on fetch 2 pages
 const DEFAULT_LIMIT = 200;
 
+/**
+ * computeRiskLevel(score)
+ * - Traduit un score (0..100) en 3 niveaux UI.
+ * - Utilisé pour : couleur, libellé, filtre et CTA.
+ */
 function computeRiskLevel(score: number): RiskLevel {
   if (score >= SUSPICIOUS_HIGH) return RiskLevel.HIGH;
   if (score >= SUSPICIOUS_MEDIUM) return RiskLevel.MEDIUM;
   return RiskLevel.LOW;
 }
 
+/**
+ * safeNumber(x)
+ * - Normalise une valeur (string|number|autre) en number.
+ * - ✅ Évite les NaN en UI (montants, scores).
+ */
 function safeNumber(x: unknown, fallback = 0): number {
   const n = typeof x === "string" ? Number(x) : typeof x === "number" ? x : NaN;
   return Number.isFinite(n) ? n : fallback;
 }
 
+/**
+ * pickScore(item)
+ * - ✅ Source de vérité : risk_score.score si présent (valeur backend “officielle”)
+ * - Fallback : item.risk.score (compat legacy / mock)
+ */
 function pickScore(item: TransactionListItem): number {
   const fromRiskScore = safeNumber(item?.risk_score?.score, NaN);
   if (Number.isFinite(fromRiskScore)) return fromRiskScore;
   return safeNumber(item?.risk?.score, 0);
 }
 
+/**
+ * pickFactors(item)
+ * - Facteurs uniquement si la structure legacy `risk.factors` existe.
+ * - Le backend actuel peut ne pas fournir de facteurs sur /transactions.
+ */
 function pickFactors(item: TransactionListItem): string[] {
   const f = item?.risk?.factors;
   return Array.isArray(f) ? f : [];
 }
 
+/**
+ * getPaymentLabel(item)
+ * - Traduit les champs transaction en un libellé UI simple.
+ * - Objectif : lecture rapide dans la table + détail.
+ */
 function getPaymentLabel(item: TransactionListItem): string {
   const tx = item.transaction;
   if (tx.is_online) return "En ligne";
@@ -68,13 +116,20 @@ function getPaymentLabel(item: TransactionListItem): string {
   return tx.channel || "Paiement";
 }
 
+/**
+ * getPaymentIcon(label)
+ * - Associe un pictogramme au libellé (repère visuel).
+ */
 function getPaymentIcon(label: string) {
   if (label === "En ligne") return <Globe size={12} />;
-  if (["Apple Pay", "Sans Contact", "Google Pay", "Mobile"].includes(label))
-    return <Smartphone size={12} />;
+  if (["Apple Pay", "Sans Contact", "Google Pay", "Mobile"].includes(label)) return <Smartphone size={12} />;
   return <CreditCard size={12} />;
 }
 
+/**
+ * extractErrMsg(err)
+ * - Rend les erreurs API “présentables” (bannière UI).
+ */
 function extractErrMsg(err: any): string {
   if (!err) return "Erreur inconnue";
   if (typeof err === "string") return err;
@@ -87,6 +142,14 @@ function extractErrMsg(err: any): string {
   }
 }
 
+/**
+ * fetchFirstNTransactions(n)
+ * - Récupère n transactions en paginant côté backend (page_size limité à 100).
+ *
+ * Pourquoi ce choix ?
+ * - On veut un tableau “dense” pour la démo (ex: 200 lignes) sans ajouter de pagination UI.
+ * - ⚠️ On évite d’envoyer sort_by/order tant qu’on n’a pas garanti leur support backend.
+ */
 async function fetchFirstNTransactions(n = DEFAULT_LIMIT): Promise<TransactionListItem[]> {
   const pageSize = PAGE_SIZE_MAX;
   let page = 1;
@@ -94,10 +157,7 @@ async function fetchFirstNTransactions(n = DEFAULT_LIMIT): Promise<TransactionLi
   let total = Infinity;
 
   while (all.length < n && all.length < total) {
-    // ⚠️ on ne passe PAS sort_by/order tant que tu n’es pas sûr que le backend les accepte
-    const res = await apiFetch<TransactionListResponse>(
-      `/transactions?page=${page}&page_size=${pageSize}`
-    );
+    const res = await apiFetch<TransactionListResponse>(`/transactions?page=${page}&page_size=${pageSize}`);
 
     const batch = res.data ?? [];
     total = res.meta?.total ?? all.length + batch.length;
@@ -115,14 +175,19 @@ const Transactions = () => {
   const [selectedTx, setSelectedTx] = useState<TransactionListItem | null>(null);
   const [filter, setFilter] = useState<"ALL" | "HIGH" | "CHECK">("ALL");
 
-  // Load/Error UI
+  // États UI (chargement / erreur)
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // AI State
+  // Assistant IA (explication pédagogique)
   const [aiAnalysis, setAiAnalysis] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
 
+  /**
+   * fetchTransactions()
+   * - Charge la liste initiale (≈200 lignes).
+   * - Sert aussi de “refresh” après une action (ex: patch d’alerte).
+   */
   const fetchTransactions = async () => {
     setLoading(true);
     setLoadError(null);
@@ -137,11 +202,17 @@ const Transactions = () => {
     }
   };
 
+  // Initial load
   useEffect(() => {
     fetchTransactions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * filtered
+   * - Filtre UI instantané basé sur le score (sans refetch).
+   * - “Cas urgents” = HIGH, “À vérifier” = MEDIUM.
+   */
   const filtered = useMemo(() => {
     return transactions.filter((t) => {
       const score = pickScore(t);
@@ -157,6 +228,11 @@ const Transactions = () => {
     setAiAnalysis("");
   };
 
+  /**
+   * handleAnalyze()
+   * - Appelle un service externe (Gemini) pour produire une explication pédagogique.
+   * - ✅ On conserve le “payload legacy” sans casser l’intégration existante.
+   */
   const handleAnalyze = async () => {
     if (!selectedTx) return;
     setAnalyzing(true);
@@ -165,7 +241,6 @@ const Transactions = () => {
     const level = computeRiskLevel(score);
     const paymentLabel = getPaymentLabel(selectedTx);
 
-    // Payload "legacy" pour Gemini (on n’y touche pas pour l’instant)
     const legacyPayload = {
       id: selectedTx.transaction.id,
       amount: selectedTx.transaction.amount,
@@ -191,12 +266,16 @@ const Transactions = () => {
     }
   };
 
+  /**
+   * patchAlertStatus(status, comment)
+   * - Permet d’agir sur le dossier lié à la transaction (si alert existe).
+   * - ✅ Règle backend : un comment est requis à la clôture.
+   * - Après patch : on refresh la liste pour rester aligné backend.
+   */
   const patchAlertStatus = async (status: "EN_ENQUETE" | "CLOTURE", comment: string) => {
     if (!selectedTx?.alert) return;
 
-    // backend: "comment required when closing"
-    const safeComment =
-      status === "CLOTURE" ? (comment || "").trim() || "Clôture via UI" : (comment || "").trim();
+    const safeComment = status === "CLOTURE" ? (comment || "").trim() || "Clôture via UI" : (comment || "").trim();
 
     await apiFetch(
       `/alerts/${selectedTx.alert.id}`,
@@ -207,19 +286,18 @@ const Transactions = () => {
       { auth: true }
     );
 
-    // refresh depuis backend
     await fetchTransactions();
     setSelectedTx(null);
   };
 
   return (
     <div className="relative h-[calc(100vh-100px)] flex flex-col">
-      {/* Header & Quick Filters */}
+      {/* En-tête + filtres rapides */}
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-white tracking-tight">Transactions récentes</h1>
         <p className="text-slate-400 text-sm mb-4">Historique des flux pour analyse et contrôle.</p>
 
-        {/* Load/Error banner */}
+        {/* ✅ Bannière de chargement / erreur (feedback immédiat) */}
         <div className="mb-4 flex items-center gap-3">
           {loading && (
             <div className="text-xs px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/50 text-slate-300">
@@ -236,6 +314,7 @@ const Transactions = () => {
           )}
         </div>
 
+        {/* Filtres : lecture métier (urgents / à vérifier) */}
         <div className="flex items-center gap-2">
           <button
             onClick={() => setFilter("ALL")}
@@ -270,7 +349,7 @@ const Transactions = () => {
         </div>
       </div>
 
-      {/* Table */}
+      {/* Table : liste principale */}
       <div className="flex-1 overflow-auto bg-slate-900 border border-slate-800 rounded-xl relative shadow-sm">
         <table className="w-full text-left text-sm text-slate-400">
           <thead className="bg-slate-950 text-slate-300 font-semibold sticky top-0 z-10">
@@ -287,9 +366,11 @@ const Transactions = () => {
           <tbody className="divide-y divide-slate-800">
             {filtered.map((item) => {
               const tx = item.transaction;
+
               const score = pickScore(item);
               const level = computeRiskLevel(score);
               const riskColor = getRiskColor(level);
+
               const amount = safeNumber(tx.amount, 0);
               const paymentLabel = getPaymentLabel(item);
 
@@ -364,12 +445,13 @@ const Transactions = () => {
           </tbody>
         </table>
 
+        {/* Empty state : quand aucun élément ne matche le filtre */}
         {!loading && filtered.length === 0 && (
           <div className="p-12 text-center text-slate-500">Aucune transaction ne correspond à ce filtre.</div>
         )}
       </div>
 
-      {/* Detail Slide-over */}
+      {/* Slide-over : détail transaction + actions */}
       <div
         className={`fixed inset-y-0 right-0 w-[480px] bg-[#0f172a] border-l border-slate-800 shadow-2xl transform transition-transform duration-300 z-50 flex flex-col ${
           selectedTx ? "translate-x-0" : "translate-x-full"
@@ -399,7 +481,7 @@ const Transactions = () => {
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-6 space-y-8">
-                  {/* Header Merchant Info */}
+                  {/* Infos commerçant : repère visuel + tags */}
                   <div className="flex items-center gap-4">
                     <div
                       className={`w-16 h-16 rounded-xl flex items-center justify-center text-white text-2xl font-bold shadow-lg ${getCategoryColor(
@@ -422,7 +504,7 @@ const Transactions = () => {
                     </div>
                   </div>
 
-                  {/* Summary Block */}
+                  {/* Résumé : score + guidance produit */}
                   <div className="bg-slate-900 rounded-xl p-5 border border-slate-800">
                     <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">Analyse Rapide</h3>
                     <div className="flex items-center gap-4 mb-4">
@@ -454,10 +536,10 @@ const Transactions = () => {
                     </div>
                   </div>
 
-                  {/* Why */}
+                  {/* Facteurs : explication humaine (si dispo) */}
                   <div>
                     <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
-                      Pourquoi c'est signalé ?
+                      Pourquoi c&apos;est signalé ?
                     </h3>
                     <div className="space-y-3">
                       {factors.map((factor, i) => (
@@ -468,6 +550,8 @@ const Transactions = () => {
                           <p className="text-sm text-slate-300">{factor}</p>
                         </div>
                       ))}
+
+                      {/* Fallback : score élevé mais pas de facteurs détaillés */}
                       {factors.length === 0 && (
                         <div className="flex gap-3 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
                           <Check size={16} className="text-emerald-500 mt-1" />
@@ -477,13 +561,14 @@ const Transactions = () => {
                     </div>
                   </div>
 
-                  {/* AI Assistant */}
+                  {/* Assistant : explication pédagogique (opt-in) */}
                   <div className="bg-gradient-to-br from-blue-900/10 to-slate-900 rounded-xl p-5 border border-blue-500/20">
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2 text-blue-400 font-medium text-sm">
                         <Bot size={18} />
                         <span>Assistant Fraude</span>
                       </div>
+
                       {!aiAnalysis && (
                         <button
                           onClick={handleAnalyze}
@@ -502,11 +587,13 @@ const Transactions = () => {
                     )}
 
                     {!aiAnalysis && !analyzing && (
-                      <p className="text-xs text-slate-500">Cliquez pour obtenir une analyse pédagogique de ce dossier.</p>
+                      <p className="text-xs text-slate-500">
+                        Cliquez pour obtenir une analyse pédagogique de ce dossier.
+                      </p>
                     )}
                   </div>
 
-                  {/* Actions */}
+                  {/* Actions dossier : uniquement si une alerte existe */}
                   {selectedTx.alert && (
                     <div className="pt-4 border-t border-slate-800">
                       <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Actions possibles</h3>
@@ -519,7 +606,9 @@ const Transactions = () => {
                         </button>
 
                         <button
-                          onClick={() => patchAlertStatus("CLOTURE", "Faux positif confirmé depuis l’onglet Transactions")}
+                          onClick={() =>
+                            patchAlertStatus("CLOTURE", "Faux positif confirmé depuis l’onglet Transactions")
+                          }
                           className="py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors"
                         >
                           Valider (Faux positif)

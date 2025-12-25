@@ -2,24 +2,47 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any, Dict
-from uuid import UUID
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.transaction import Transaction
 
+"""
+Feature Builder.
+
+Rôle (fonctionnel) :
+- Construit un dictionnaire de features “simples mais crédibles” pour le scoring.
+- Combine :
+  - signaux directs de la transaction (montant, canal, arrondissement, heure…)
+  - signaux contextuels calculés en DB sur des fenêtres glissantes (24h / 7 jours)
+
+Objectif :
+- Fournir un format stable consommé par :
+  - le vectorizer (app.ml.feature_vectorizer)
+  - l’inférence (app.ml.inference)
+  - la persistance dans RiskScore.features (audit/debug)
+
+Notes :
+- Les features restent volontairement “légères” : assez réalistes pour une démo,
+  sans complexité data science (pas de jointures lourdes / pas de state externe).
+"""
+
 
 class FeatureBuilder:
     """
-    Construit un dictionnaire de features "simples mais crédibles"
-    à partir d'une transaction + un peu de contexte DB.
+    Construit un dictionnaire de features à partir d'une transaction + contexte DB.
+
+    Features calculées :
+    - hour : heure de la transaction
+    - merchant_tx_count_24h : fréquence 24h sur le même merchant (proxy “burst / répétition”)
+    - avg_amount_category_7d : moyenne 7j sur la même catégorie (proxy “montant habituel”)
     """
 
     async def build(self, db: AsyncSession, tx: Transaction) -> Dict[str, Any]:
         hour = tx.occurred_at.hour
 
-        # Fenêtre glissante 24h sur "même commerçant" (proxy de fréquence)
+        # Fenêtre glissante 24h : fréquence pour le même marchand (proxy de répétition)
         since_24h = tx.occurred_at - timedelta(hours=24)
 
         freq_stmt = (
@@ -29,7 +52,7 @@ class FeatureBuilder:
         )
         merchant_tx_count_24h = (await db.execute(freq_stmt)).scalar_one()
 
-        # Montant moyen 7 jours (proxy de "montant habituel" par catégorie)
+        # Fenêtre glissante 7j : montant moyen par catégorie (proxy de “montant habituel”)
         since_7d = tx.occurred_at - timedelta(days=7)
 
         avg_stmt = (

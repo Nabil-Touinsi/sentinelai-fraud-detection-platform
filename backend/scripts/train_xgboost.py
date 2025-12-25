@@ -13,14 +13,42 @@ from sqlalchemy import create_engine, text
 from app.core.settings import settings
 from app.ml.feature_vectorizer import FeatureSpec, vectorize
 
+"""
+Script CLI: train_xgboost
+
+Rôle (fonctionnel) :
+- Entraîne un modèle supervisé XGBoost (XGBClassifier) à partir des transactions en base.
+- Utilise un “pseudo-label” pour la démo : fraude = 1 si rs_score >= ALERT_THRESHOLD.
+  (rs_score provient de risk_scores, donc ce script suppose que des scores existent déjà.)
+- Transforme les inputs via FeatureSpec + vectorize() (même pipeline que runtime).
+- Exporte un bundle .joblib versionné dans backend/models/ :
+  - model (XGBClassifier)
+  - spec (vocabulaires one-hot)
+  - meta (kind, model_version, trained_at, règle de labeling)
+
+Usage typique :
+- Démo / PoC : on génère des transactions + risk_scores (seed + scoring),
+  puis on apprend un modèle “IA” simple sur la base de ce signal.
+- Le runtime chargera ensuite automatiquement le modèle le plus récent
+  (priorité XGBoost, fallback IsolationForest).
+
+Notes :
+- Le pseudo-label n’est pas une vérité terrain : il sert à rendre la démo crédible et stable.
+- Les rolling features ne sont pas calculées ici (supervisé simple) :
+  on met 0, et vectorize() reste compatible avec l’inférence (train = inference).
+- scale_pos_weight compense le déséquilibre (peu de “fraudes”).
+"""
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", default="v1")
+    ap.add_argument("--version", default="v1", help="Tag de version (ex: v1, v2) pour le nom du modèle exporté")
     args = ap.parse_args()
 
+    # Connexion DB sync (scripts)
     engine = create_engine(settings.DATABASE_URL_SYNC)
 
+    # Dataset: transactions + score existant (pseudo-label)
     q = text("""
         SELECT
             t.id, t.occurred_at, t.amount, t.merchant_name, t.merchant_category,
@@ -38,36 +66,49 @@ def main():
     df["occurred_at"] = pd.to_datetime(df["occurred_at"], utc=True)
     df["hour"] = df["occurred_at"].dt.hour
 
-    # label supervisé: "fraude" si score >= seuil (pseudo-label)
+    # Label supervisé de démo (pseudo-label)
     y = (df["rs_score"] >= settings.ALERT_THRESHOLD).astype(int)
 
-    # vocab depuis dataset
+    # Vocab (top-N) : one-hot + "other" (géré dans vectorize)
     cat_vocab = tuple(df["merchant_category"].fillna("unknown").str.lower().value_counts().head(12).index.tolist())
     ch_vocab = tuple(df["channel"].fillna("unknown").str.lower().value_counts().head(6).index.tolist())
     z_vocab = tuple(df["arrondissement"].fillna("unknown").str.lower().value_counts().head(12).index.tolist())
     spec = FeatureSpec(categories=cat_vocab, channels=ch_vocab, zones=z_vocab)
 
+    # Vectorisation (train = inference)
     X = []
     for _, r in df.iterrows():
         feats = {
             "hour": int(r["hour"]),
             "amount": float(r["amount"]),
             "is_online": bool(r["is_online"]),
-            # Pas de rolling ici (supervisé simple) -> on met 0 (train=inference OK car vectorize gère)
+
+            # Supervisé simple : pas de rolling ici -> on fixe 0.
+            # (vectorize() sait gérer ces champs, et l'inférence les fournit en vrai via FeatureBuilder)
             "merchant_tx_count_24h": 0,
             "avg_amount_category_7d": 0.0,
+
             "category": str(r["merchant_category"] or ""),
             "channel": str(r["channel"] or ""),
             "arrondissement": str(r["arrondissement"] or ""),
         }
         X.append(vectorize(feats, spec))
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+    # Split train/test avec stratify (répartition stable des classes)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.25,
+        random_state=42,
+        stratify=y,
+    )
 
+    # Rebalancing (fraude rare)
     pos = int(y_train.sum())
-    neg = int((len(y_train) - pos))
+    neg = int(len(y_train) - pos)
     scale_pos_weight = (neg / max(pos, 1))
 
+    # Entraînement XGBoost
     model = XGBClassifier(
         n_estimators=250,
         max_depth=4,
@@ -80,9 +121,11 @@ def main():
     )
     model.fit(X_train, y_train)
 
+    # Versioning artefact
     now = datetime.utcnow().strftime("%Y%m%d-%H%M")
     model_version = f"xgboost_{args.version}_{now}"
 
+    # Sortie dans backend/models/
     out_dir = Path(__file__).resolve().parents[1] / "models"
     out_dir.mkdir(parents=True, exist_ok=True)
 

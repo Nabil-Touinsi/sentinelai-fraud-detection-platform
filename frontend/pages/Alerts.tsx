@@ -10,6 +10,26 @@ import {
 } from "../types";
 import { apiFetch } from "../services/api";
 
+/**
+ * Page Alerts (Gestion des dossiers)
+ *
+ * Rôle :
+ * - Affiche la file de “signalements” (alertes) triés par priorité.
+ * - Permet de suivre un workflow simple :
+ *   - À traiter -> En enquête -> Clôturé
+ * - L’UI se met à jour en “temps réel” :
+ *   - WebSocket si disponible
+ *   - fallback polling sinon
+ *
+ * Données attendues :
+ * - GET `/alerts?page=1&page_size=200&sort_by=priority&order=desc`
+ *   - chaque item contient `alert` + `transaction`
+ *
+ * Règles produit importantes :
+ * - “Signalements / dossiers” = alertes (liées à une transaction)
+ * - À la clôture, le backend exige un commentaire : fallback côté UI si vide
+ */
+
 const POLL_MS = 7000;
 
 // ✅ une seule source de vérité: VITE_API_URL
@@ -17,7 +37,7 @@ const API_URL =
   (import.meta as any).env?.VITE_API_URL?.toString()?.replace(/\/+$/, "") ||
   "http://127.0.0.1:8000";
 
-// ✅ WS base dérivée de l'API
+// ✅ WS base dérivée de l'API (même host, protocole ws/wss)
 const wsBase = API_URL.startsWith("https://")
   ? API_URL.replace("https://", "wss://")
   : API_URL.replace("http://", "ws://");
@@ -56,6 +76,11 @@ const TabButton = ({ label, count, active, onClick, icon }: TabButtonProps) => (
   </button>
 );
 
+/**
+ * extractErrMsg(err)
+ * - Transforme des erreurs hétérogènes (API / exception) en message lisible pour l’UI.
+ * - Objectif : éviter d’afficher “[object Object]” ou des erreurs trop techniques.
+ */
 function extractErrMsg(err: any): string {
   if (!err) return "Erreur inconnue";
   if (typeof err === "string") return err;
@@ -81,6 +106,14 @@ const Alerts = () => {
   const destroyedRef = useRef(false);
   const connectingRef = useRef(false);
 
+  /**
+   * fetchAlerts()
+   * - Récupère la liste des dossiers (source de vérité UI).
+   * - Utilisé :
+   *   - au chargement initial
+   *   - lors des événements temps réel (WS)
+   *   - en fallback polling
+   */
   const fetchAlerts = async () => {
     setLoading(true);
     setErrMsg(null);
@@ -98,6 +131,11 @@ const Alerts = () => {
     }
   };
 
+  /**
+   * counts
+   * - Compteurs d’onglets calculés à partir des statuts.
+   * - On normalise le status (sécurité) avant de compter.
+   */
   const counts = useMemo(() => {
     const c = { a: 0, e: 0, cl: 0 };
     for (const it of items) {
@@ -109,12 +147,20 @@ const Alerts = () => {
     return c;
   }, [items]);
 
+  /**
+   * currentList
+   * - Liste affichée selon l’onglet actif.
+   */
   const currentList = useMemo(() => {
     return items.filter((it) => normalizeAlertStatus(it.alert.status) === activeTab);
   }, [items, activeTab]);
 
+  /**
+   * patchAlert(alertId, status, comment?)
+   * - Met à jour le statut d’un dossier.
+   * - Règle backend : commentaire requis à la clôture => fallback côté UI si vide.
+   */
   const patchAlert = async (alertId: string, status: AlertStatus, comment?: string) => {
-    // ✅ règle backend : comment requis à la clôture
     const safeComment =
       status === AlertStatus.CLOTURE
         ? (comment || "").trim() || "Clôture via UI"
@@ -130,8 +176,12 @@ const Alerts = () => {
     );
   };
 
+  /**
+   * moveAlert(alertId, newStatus)
+   * - UX : mise à jour optimiste (on voit le statut changer tout de suite).
+   * - En cas d’échec : on se “resynchronise” avec l’API via fetchAlerts().
+   */
   const moveAlert = async (alertId: string, newStatus: AlertStatus) => {
-    // optimistic UI
     setItems((prev) =>
       prev.map((it) =>
         it.alert.id === alertId
@@ -156,7 +206,7 @@ const Alerts = () => {
     }
   };
 
-  // initial load
+  // Chargement initial
   useEffect(() => {
     destroyedRef.current = false;
     fetchAlerts().catch(() => {});
@@ -166,7 +216,11 @@ const Alerts = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // WS + fallback polling
+  /**
+   * Temps réel (WS) + fallback polling
+   * - WS : on se resynchronise sur des événements métier (création / score / changement statut).
+   * - Polling : assure une UI “vivante” même si WS tombe.
+   */
   useEffect(() => {
     const startPolling = () => {
       setRtMode("Polling");
@@ -200,6 +254,8 @@ const Alerts = () => {
         ws.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
+
+            // On rafraîchit uniquement sur des événements qui impactent la liste.
             if (
               msg?.type === "ALERT_CREATED" ||
               msg?.type === "ALERT_STATUS_CHANGED" ||
@@ -208,7 +264,7 @@ const Alerts = () => {
               fetchAlerts().catch(() => {});
             }
           } catch {
-            // ignore
+            
           }
         };
 
@@ -242,6 +298,7 @@ const Alerts = () => {
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Gestion des dossiers</h1>
           <p className="text-slate-400 text-sm">Traitez les signalements prioritaires.</p>
+
           {errMsg && (
             <div className="mt-3 text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
               {errMsg}
@@ -258,7 +315,7 @@ const Alerts = () => {
         </div>
       </div>
 
-      {/* Tabs */}
+      {/* Onglets : workflow de traitement */}
       <div className="flex border-b border-slate-800 mb-6">
         <TabButton
           label="À traiter"
@@ -283,7 +340,7 @@ const Alerts = () => {
         />
       </div>
 
-      {/* List Content */}
+      {/* Liste : 1 carte = 1 dossier (alerte + transaction associée) */}
       <div className="space-y-3">
         {currentList.length === 0 ? (
           <div className="py-20 text-center bg-slate-900/50 rounded-xl border border-slate-800 border-dashed">
@@ -298,12 +355,14 @@ const Alerts = () => {
             const alert = it.alert;
             const tx = it.transaction;
 
+            // Score affiché (badge) : lecture rapide du niveau de risque
             const score = Number(alert.score_snapshot ?? 0);
             const scoreClass =
               score >= 80
                 ? "bg-red-500/10 border-red-500/20 text-red-500"
                 : "bg-amber-500/10 border-amber-500/20 text-amber-500";
 
+            // Certains montants arrivent en string
             const amount = typeof tx.amount === "string" ? Number(tx.amount) : tx.amount;
 
             return (
@@ -312,7 +371,9 @@ const Alerts = () => {
                 className="bg-slate-900 hover:bg-slate-800/80 border border-slate-800 rounded-lg p-5 transition-all shadow-sm flex items-center justify-between group"
               >
                 <div className="flex items-center gap-5">
-                  <div className={`flex flex-col items-center justify-center w-12 h-12 rounded-lg border ${scoreClass}`}>
+                  <div
+                    className={`flex flex-col items-center justify-center w-12 h-12 rounded-lg border ${scoreClass}`}
+                  >
                     <span className="text-lg font-bold">{score}</span>
                   </div>
 
@@ -326,7 +387,9 @@ const Alerts = () => {
                         {tx.merchant_category}
                       </span>
                       <span className="text-slate-600 text-[10px]">•</span>
-                      <span className="text-xs text-slate-400">{new Date(alert.created_at).toLocaleString()}</span>
+                      <span className="text-xs text-slate-400">
+                        {new Date(alert.created_at).toLocaleString()}
+                      </span>
                     </div>
 
                     <div className="text-white font-medium flex items-center gap-2">
@@ -337,7 +400,9 @@ const Alerts = () => {
                       </span>
                     </div>
 
-                    <div className="text-sm text-slate-400 mt-0.5">Raison: {alert.reason || "Score élevé détecté"}</div>
+                    <div className="text-sm text-slate-400 mt-0.5">
+                      Raison: {alert.reason || "Score élevé détecté"}
+                    </div>
                   </div>
                 </div>
 
