@@ -49,36 +49,130 @@ const API_URL =
   (import.meta as any).env?.VITE_API_URL?.toString()?.replace(/\/+$/, "") ||
   "http://127.0.0.1:8000";
 
+/** --- helpers --- */
 function isoNowPlusMinutes(deltaMinutes: number) {
   const d = new Date(Date.now() + deltaMinutes * 60 * 1000);
   return d.toISOString();
 }
 
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function rand(min: number, max: number): number {
+  return Math.random() * (max - min) + min;
+}
+
+function chance(p: number): boolean {
+  return Math.random() < p;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * 🎯 Niveau 1 : Démo "plus réelle"
+ * - payload NON statique
+ * - variations réalistes : merchant, arrondissement, montant, online, heure
+ * - toujours cohérent avec l’intention (NORMAL vs FRAUD)
+ */
 function buildScenarioPayload(type: ScenarioType) {
+  // ⚠️ Garde des valeurs “compatibles” avec ton back (strings simples)
+  const normalMerchants = ["Carrefour City", "Monoprix", "Franprix", "Boulangerie", "SNCF", "Pharmacie"];
+  const fraudMerchants = ["Amazon", "Cdiscount", "AliExpress", "Fnac.com", "Deliveroo", "Uber", "Apple Store"];
+
+  // Tu peux choisir soit codes postaux (750xx) soit “Paris 10e”.
+  // Je garde ton format actuel (750xx) pour ne pas casser un éventuel parsing back.
+  const arrCodes = [
+    "75001",
+    "75002",
+    "75003",
+    "75004",
+    "75005",
+    "75006",
+    "75007",
+    "75008",
+    "75009",
+    "75010",
+    "75011",
+    "75012",
+    "75013",
+    "75014",
+    "75015",
+    "75016",
+    "75017",
+    "75018",
+    "75019",
+    "75020",
+  ];
+
+  const normalCategories = ["supermarche", "transport", "restaurant", "pharmacie", "shopping"];
+  const fraudCategories = ["ecommerce", "electronics", "luxury", "giftcards", "services"];
+
+  // “Maintenant” avec un petit jitter (ça change l’horodatage, donc plus crédible)
+  const jitterMinutes = Math.floor(rand(-180, 10)); // -3h à +10min
+  const occurred_at = isoNowPlusMinutes(jitterMinutes);
+
   if (type === "FRAUD") {
+    // Montant suspect : 300–3000€ + 5% d’extrême 7000–12000€
+    let amount = rand(300, 3000);
+    if (chance(0.05)) amount = rand(7000, 12000);
+
+    const merchant_name = pick(fraudMerchants);
+    const merchant_category = pick(fraudCategories);
+    const arrondissement = pick(arrCodes);
+
+    // Suspect = beaucoup plus souvent online
+    const is_online = chance(0.85);
+
+    // Description un peu variée
+    const descriptions = [
+      "achat en ligne montant élevé",
+      "transaction ecommerce atypique",
+      "paiement en ligne récurrent",
+      "tentative achat rapide",
+      "commande express montant élevé",
+    ];
+
     return {
-      occurred_at: isoNowPlusMinutes(0),
-      amount: 9999.99,
+      occurred_at,
+      amount: round2(amount),
       currency: "EUR",
-      merchant_name: "WS Test Extreme",
-      merchant_category: "ecommerce",
-      arrondissement: "75010",
+      merchant_name,
+      merchant_category,
+      arrondissement,
       channel: "card",
-      is_online: true,
-      description: "test ws",
+      is_online,
+      description: pick(descriptions),
     };
   }
 
+  // NORMAL : 5–120€, mix online faible
+  const amount = rand(5, 120);
+  const merchant_name = pick(normalMerchants);
+  const merchant_category = pick(normalCategories);
+  const arrondissement = pick(arrCodes);
+  const is_online = chance(0.25);
+
+  const descriptions = [
+    "achat quotidien",
+    "paiement carte",
+    "dépense courante",
+    "achat alimentaire",
+    "transport",
+  ];
+
   return {
-    occurred_at: isoNowPlusMinutes(0),
-    amount: 24.9,
+    occurred_at,
+    amount: round2(amount),
     currency: "EUR",
-    merchant_name: "Carrefour City",
-    merchant_category: "supermarche",
-    arrondissement: "75011",
+    merchant_name,
+    merchant_category,
+    arrondissement,
     channel: "card",
-    is_online: false,
-    description: "achat quotidien",
+    is_online,
+    description: pick(descriptions),
   };
 }
 

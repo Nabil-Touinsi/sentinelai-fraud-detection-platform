@@ -13,6 +13,10 @@ type DashboardStats = {
   openAlerts: number;
   criticalAlerts: number;
   avgResolutionTimeMinutes: number;
+
+  // ✅ Micro-variation live (sans mentir) — on garde en data, mais on n'affiche pas en UI
+  avgResolutionTimeMinutes24h: number;
+  resolvedCount24h: number;
 };
 
 type DashboardSummary = {
@@ -108,11 +112,21 @@ function formatTs(s: SystemStatus | null): string | null {
   return d.toLocaleTimeString();
 }
 
-/** ✅ Compat: backend = score_snapshot, mock = risk_score_snapshot */
+/**
+ * ✅ Snapshot compatible:
+ * - si backend renvoie 0..100 → on garde
+ * - si ça renvoie 0..1 (score normalisé) → on convertit en 0..100
+ */
 function getSnapshot(a: any): number {
-  const v = a?.score_snapshot ?? a?.risk_score_snapshot ?? a?.riskScoreSnapshot ?? a?.risk?.score;
+  const v = a?.score_snapshot ?? a?.risk_score_snapshot ?? a?.riskScoreSnapshot ?? a?.risk?.score ?? a?.riskScore;
   const n = typeof v === "string" ? Number(v) : v;
-  return Number.isFinite(n) ? n : 0;
+  if (!Number.isFinite(n)) return 0;
+
+  // si c'est un score normalisé
+  if (n > 0 && n <= 1) return Math.round(n * 100);
+
+  // score déjà en pourcentage
+  return n;
 }
 
 /** ✅ Compat: backend = CLOTURE / EN_ENQUETE / A_TRAITER, mock = CLOSED / NEW / ... */
@@ -155,6 +169,68 @@ function computeAvgResolutionMinutes(alertItems: any[]): number {
   return n ? Math.round(sum / n) : 0;
 }
 
+function computeAvgResolutionMinutesSince(
+  alertItems: any[],
+  sinceMs: number
+): { avgMinutes: number; count: number } {
+  const now = Date.now();
+  const cutoff = now - sinceMs;
+
+  const closed = alertItems.filter((x) => isClosedStatus(x?.status));
+  if (closed.length === 0) return { avgMinutes: 0, count: 0 };
+
+  let sum = 0;
+  let n = 0;
+
+  for (const a of closed) {
+    const c = new Date(a?.created_at ?? "").getTime();
+    const u = new Date(a?.updated_at ?? "").getTime();
+
+    if (!Number.isFinite(c) || !Number.isFinite(u)) continue;
+    if (u < c) continue;
+    if (u < cutoff) continue;
+
+    sum += (u - c) / 60000;
+    n += 1;
+  }
+
+  return { avgMinutes: n ? Math.round(sum / n) : 0, count: n };
+}
+
+function formatDuration(mins: number): string {
+  if (!Number.isFinite(mins) || mins <= 0) return "—";
+
+  const m = Math.round(mins);
+
+  const maxDays = 7;
+  const maxMins = maxDays * 24 * 60;
+  if (m >= maxMins) return `> ${maxDays}j`;
+
+  if (m < 60) return `${m} min`;
+
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
+
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d}j ${rh}h` : `${d}j`;
+}
+
+// --- Helpers pour “calme / moyen / chaud” (quantiles) ---
+function quantile(sorted: number[], q: number): number {
+  if (!sorted.length) return 0;
+  const pos = (sorted.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  const next = sorted[base + 1] ?? sorted[base];
+  return sorted[base] + rest * (next - sorted[base]);
+}
+
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
+}
+
 // ✅ Base dérivée de VITE_API_URL (une seule env)
 const API_URL =
   (import.meta as any).env?.VITE_API_URL?.toString()?.replace(/\/+$/, "") || "http://127.0.0.1:8000";
@@ -175,88 +251,124 @@ const Dashboard = () => {
   const [sysOk, setSysOk] = useState<boolean>(false);
   const [sysError, setSysError] = useState<string | null>(null);
 
+  // ✅ Simulateur (toggle + intensité)
+  const [simulateOn, setSimulateOn] = useState<boolean>(true);
+  const [simulateN, setSimulateN] = useState<number>(3);
+
   const refreshData = async () => {
-  try {
-    // 1) Summary (KPI + séries + hotspots)
-    const summary = await apiFetch<DashboardSummary>("/dashboard/summary?days=30&top_n=8");
+    try {
+      const qs = new URLSearchParams({
+        days: "30",
+        top_n: "8",
+      });
 
-    // 2) Alerts list (pour la todolist + avg resolution)
-    const alertsResp = await apiFetch<any>("/alerts?page=1&page_size=200");
-    const items = Array.isArray(alertsResp) ? alertsResp : alertsResp?.data ?? [];
+      if (simulateOn) {
+        qs.set("simulate", "true");
+        qs.set("simulate_n", String(simulateN));
+      }
 
-    // Normalise en objets "flat" (alert + transaction + risk)
-    const flatAlerts = items.map((it: any) => {
-      const alert = it?.alert ?? it;
-      const tx = it?.transaction ?? it?.tx ?? {};
-      const rs = it?.risk_score ?? null;
+      const summary = await apiFetch<DashboardSummary>(`/dashboard/summary?${qs.toString()}`);
 
-      return {
-        ...alert,
-        transaction: tx,
-        risk: {
-          score: rs?.score ?? alert?.score_snapshot ?? 0,
-          factors: alert?.reason ? [alert.reason] : [],
-        },
-      };
-    });
+      const alertsResp = await apiFetch<any>("/alerts?page=1&page_size=200");
+      const items = Array.isArray(alertsResp) ? alertsResp : alertsResp?.data ?? [];
 
-    // --- STATS (branché backend)
-    const days = summary?.series?.days ?? [];
-    const todayPoint = days.length ? days[days.length - 1] : null;
-
-    const s: DashboardStats = {
-      totalTransactionsToday: todayPoint?.transactions ?? 0,
-      openAlerts: summary?.kpis?.alerts_open ?? 0,
-      criticalAlerts: summary?.kpis?.alerts_critical ?? 0,
-      avgResolutionTimeMinutes: computeAvgResolutionMinutes(flatAlerts),
-    };
-    setStats(s);
-
-    // --- Urgent alerts (top 5 non clôturées)
-    setUrgentAlerts(
-      flatAlerts
-        .filter((a: any) => !isClosedStatus(a?.status))
-        .sort((x: any, y: any) => getSnapshot(y) - getSnapshot(x))
-        .slice(0, 5)
-    );
-
-    // --- Graph: 12 derniers jours d'alertes (plus de random)
-    const last12 = days.slice(-12);
-    setChartData(
-      last12.map((p) => ({
-        time: String(p.date ?? "").slice(5), // "MM-DD"
-        count: Number(p.alerts ?? 0),
-      }))
-    );
-
-    // --- Carte Paris: basée sur les hotspots (top arrondissements)
-    // IMPORTANT: on fournit aussi "count" pour que ParisMap affiche le vrai volume
-    const hotspotTx = (summary?.hotspots?.arrondissements ?? [])
-      .map((h) => {
-        const zone = toZoneParis(h.key);
-        if (!zone) return null;
-
-        const score =
-          typeof h.avg_score === "number"
-            ? h.avg_score
-            : Math.min(100, 30 + Math.round((h.count ?? 0) * 8));
+      const flatAlerts = items.map((it: any) => {
+        const alert = it?.alert ?? it;
+        const tx = it?.transaction ?? it?.tx ?? {};
+        const rs = it?.risk_score ?? null;
 
         return {
-          id: `hotspot-${zone}`,
-          amount: 0,
-          zone_paris: zone,
-          count: h.count ?? 1,
-          risk: { score },
+          ...alert,
+          transaction: tx,
+          risk: {
+            // on garde une valeur “comme elle vient”, getSnapshot gère 0..1 vs 0..100
+            score: rs?.score ?? alert?.score_snapshot ?? alert?.risk_score_snapshot ?? 0,
+            factors: alert?.reason ? [alert.reason] : [],
+          },
         };
-      })
-      .filter(Boolean);
+      });
 
-    setMapTx(hotspotTx);
-  } catch (e) {
-    console.error("Dashboard refreshData error:", e);
-    // On ne casse pas l'écran si un appel échoue
-  }
-};
+      const days = summary?.series?.days ?? [];
+      const todayPoint = days.length ? days[days.length - 1] : null;
+
+      const avgAll = computeAvgResolutionMinutes(flatAlerts);
+      const last24h = computeAvgResolutionMinutesSince(flatAlerts, 24 * 60 * 60 * 1000);
+
+      const s: DashboardStats = {
+        totalTransactionsToday: todayPoint?.transactions ?? 0,
+        openAlerts: summary?.kpis?.alerts_open ?? 0,
+        criticalAlerts: summary?.kpis?.alerts_critical ?? 0,
+        avgResolutionTimeMinutes: avgAll,
+        avgResolutionTimeMinutes24h: last24h.avgMinutes,
+        resolvedCount24h: last24h.count,
+      };
+      setStats(s);
+
+      setUrgentAlerts(
+        flatAlerts
+          .filter((a: any) => !isClosedStatus(a?.status))
+          .sort((x: any, y: any) => {
+            const ds = getSnapshot(y) - getSnapshot(x);
+            if (ds !== 0) return ds;
+            return new Date(y?.created_at ?? 0).getTime() - new Date(x?.created_at ?? 0).getTime();
+          })
+          .slice(0, 5)
+      );
+
+      const last12 = days.slice(-12);
+      setChartData(
+        last12.map((p) => ({
+          time: String(p.date ?? "").slice(5),
+          count: Number(p.alerts ?? 0),
+        }))
+      );
+
+      // ✅ MAP: on force une échelle avec VERT (0..1) + on fournit aussi 0..100 en fallback
+      const arrs = summary?.hotspots?.arrondissements ?? [];
+      const counts = arrs
+        .map((h) => Number(h.count ?? 0))
+        .filter((n) => Number.isFinite(n))
+        .sort((a, b) => a - b);
+
+      const q33 = quantile(counts, 0.33);
+      const q66 = quantile(counts, 0.66);
+      const max = counts.length ? counts[counts.length - 1] : 0;
+
+      const hotspotTx = arrs
+        .map((h) => {
+          const zone = toZoneParis(h.key);
+          if (!zone) return null;
+
+          const c = Number(h.count ?? 0);
+
+          // calme/moyen/chaud par volume (quantiles)
+          const base100 = c <= q33 ? 10 : c <= q66 ? 55 : 92; // => vert / orange / rouge
+          const boost100 = max > 0 ? Math.round((c / max) * 6) : 0; // petite nuance
+          const score100 = clamp(base100 + boost100, 0, 100);
+          const score01 = clamp(score100 / 100, 0, 1);
+
+          return {
+            id: `hotspot-${zone}`,
+            amount: 0,
+            zone_paris: zone,
+            count: c, // on garde le vrai chiffre affiché
+            // ✅ pour la couleur: si ParisMap lit risk.score (0..1) => on a enfin du vert
+            risk: { score: score01, score_pct: score100 },
+
+            // ✅ fallbacks fréquents dans les maps/tiles (si ParisMap lit ces champs)
+            score_snapshot: score100,
+            risk_score_snapshot: score100,
+            riskScoreSnapshot: score100,
+            intensity: score01,
+          };
+        })
+        .filter(Boolean);
+
+      setMapTx(hotspotTx);
+    } catch (e) {
+      console.error("Dashboard refreshData error:", e);
+    }
+  };
 
   const refreshSystemStatus = async () => {
     try {
@@ -277,7 +389,7 @@ const Dashboard = () => {
     refreshSystemStatus();
 
     const intervalData = setInterval(refreshData, 10000);
-const intervalSys = setInterval(refreshSystemStatus, 10000);
+    const intervalSys = setInterval(refreshSystemStatus, 10000);
 
     return () => {
       clearInterval(intervalData);
@@ -324,6 +436,32 @@ const intervalSys = setInterval(refreshSystemStatus, 10000);
 
           <div className="h-8 w-[1px] bg-slate-700"></div>
 
+          {/* ✅ Simulateur */}
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-slate-400 flex items-center gap-2 select-none">
+              <input
+                type="checkbox"
+                className="accent-blue-500"
+                checked={simulateOn}
+                onChange={(e) => setSimulateOn(e.target.checked)}
+              />
+              Simulateur
+            </label>
+
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={simulateN}
+              onChange={(e) => setSimulateN(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
+              className="w-16 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200"
+              title="Nombre de transactions simulées par refresh"
+              disabled={!simulateOn}
+            />
+          </div>
+
+          <div className="h-8 w-[1px] bg-slate-700"></div>
+
           <div
             className={`flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-full border ${
               sysOk
@@ -366,9 +504,11 @@ const intervalSys = setInterval(refreshSystemStatus, 10000);
           icon={<AlertTriangle size={18} className="text-red-400" />}
           isUrgent={stats.criticalAlerts > 0}
         />
+
+        {/* ✅ KPI: grande écriture seulement */}
         <KpiCard
           label="Temps moy. traitement"
-          value={`${stats.avgResolutionTimeMinutes} min`}
+          value={formatDuration(stats.avgResolutionTimeMinutes)}
           icon={<Clock size={18} className="text-slate-400" />}
         />
       </div>
@@ -377,8 +517,7 @@ const intervalSys = setInterval(refreshSystemStatus, 10000);
         {/* To Do List */}
         <div className="lg:col-span-2 flex flex-col gap-4">
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-            À faire maintenant
+            <span className="w-2 h-2 rounded-full bg-blue-500"></span>À faire maintenant
           </h2>
 
           <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
@@ -494,14 +633,7 @@ const intervalSys = setInterval(refreshSystemStatus, 10000);
                     itemStyle={{ color: "#fff" }}
                     cursor={{ stroke: "#334155" }}
                   />
-                  <Area
-                    type="monotone"
-                    dataKey="count"
-                    stroke="#ef4444"
-                    strokeWidth={2}
-                    fillOpacity={1}
-                    fill="url(#colorAlerts)"
-                  />
+                  <Area type="monotone" dataKey="count" stroke="#ef4444" strokeWidth={2} fillOpacity={1} fill="url(#colorAlerts)" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -520,8 +652,8 @@ const intervalSys = setInterval(refreshSystemStatus, 10000);
             </div>
             <div className="mt-4 p-3 bg-blue-900/10 border border-blue-900/20 rounded-lg">
               <p className="text-xs text-blue-300 leading-relaxed">
-                <span className="font-bold">Info Quartier :</span> Les zones “hotspots” sont calculées à partir des alertes
-                des 30 derniers jours.
+                <span className="font-bold">Info Quartier :</span> Les zones “hotspots” sont calculées à partir des
+                transactions à risque des 30 derniers jours
               </p>
             </div>
           </div>
@@ -531,9 +663,9 @@ const intervalSys = setInterval(refreshSystemStatus, 10000);
   );
 };
 
-const KpiCard = ({ label, value, icon, highlight, isUrgent }: any) => (
+const KpiCard = ({ label, value, icon, highlight, isUrgent, sub }: any) => (
   <div
-    className={`p-5 rounded-xl border flex flex-col justify-between h-24 ${
+    className={`p-5 rounded-xl border flex flex-col justify-between min-h-[96px] ${
       isUrgent ? "bg-red-500/10 border-red-500/20" : "bg-slate-900 border-slate-800"
     }`}
   >
@@ -543,12 +675,17 @@ const KpiCard = ({ label, value, icon, highlight, isUrgent }: any) => (
       </span>
       {icon}
     </div>
-    <div
-      className={`text-2xl font-bold tracking-tight ${
-        isUrgent ? "text-red-400" : highlight ? "text-amber-400" : "text-white"
-      }`}
-    >
-      {value}
+
+    <div className="flex flex-col gap-1">
+      <div
+        className={`text-2xl font-bold tracking-tight ${
+          isUrgent ? "text-red-400" : highlight ? "text-amber-400" : "text-white"
+        }`}
+      >
+        {value}
+      </div>
+
+      {sub ? <div className="text-[11px] text-slate-500 leading-tight">{sub}</div> : null}
     </div>
   </div>
 );

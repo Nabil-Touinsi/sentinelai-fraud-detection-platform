@@ -1,0 +1,5 @@
+/* Minimal stylesheet to satisfy index.html link */
+html, body {
+  height: 100%;
+  margin: 0;
+}

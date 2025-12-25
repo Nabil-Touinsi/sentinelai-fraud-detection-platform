@@ -5,6 +5,15 @@ interface Props {
   data: FullTransactionData[];
 }
 
+function quantile(sorted: number[], q: number): number {
+  if (!sorted.length) return 0;
+  const pos = (sorted.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  const next = sorted[base + 1] ?? sorted[base];
+  return sorted[base] + rest * (next - sorted[base]);
+}
+
 const ParisMap: React.FC<Props> = ({ data }) => {
   // stats par zone: count = somme(count) et avgRisk pondéré
   const zoneStats = Array(20)
@@ -19,7 +28,7 @@ const ParisMap: React.FC<Props> = ({ data }) => {
 
       const weightedRiskSum = items.reduce((acc, curr) => {
         const c = curr.count ?? 1;
-        const r = curr.risk?.score ?? 0;
+        const r = curr.risk?.score ?? 0; // ici on attend 0..100 (comme ton tooltip l'affiche)
         return acc + r * c;
       }, 0);
 
@@ -28,15 +37,26 @@ const ParisMap: React.FC<Props> = ({ data }) => {
       return { count: totalCount, avgRisk };
     });
 
-  // Couleur = surtout selon la fréquence (count), et le risque ajoute un "glow"
+  // ✅ Seuils DYNAMIQUES pour avoir du vert / orange / rouge
+  // On calcule sur les zones qui ont une activité (count > 0)
+  const activeCounts = zoneStats
+    .map((z) => z.count)
+    .filter((c) => Number.isFinite(c) && c > 0)
+    .sort((a, b) => a - b);
+
+  // si très peu de données, fallback safe
+  const q33 = activeCounts.length >= 3 ? quantile(activeCounts, 0.33) : 2;
+  const q66 = activeCounts.length >= 3 ? quantile(activeCounts, 0.66) : 5;
+
+  // Couleur = selon la fréquence relative (quantiles), glow selon risque
   const getColor = (risk: number, count: number) => {
     if (count === 0) return "bg-slate-800/50 border-slate-800 text-slate-600";
 
-    // seuils simples (tu peux ajuster)
-    if (count <= 2) return "bg-emerald-500/25 border-emerald-500/35 text-emerald-300";
-    if (count <= 5) return "bg-amber-500/25 border-amber-500/35 text-amber-300";
+    // ✅ calme / moyen / chaud basés sur la distribution réelle
+    if (count <= q33) return "bg-emerald-500/25 border-emerald-500/35 text-emerald-300";
+    if (count <= q66) return "bg-amber-500/25 border-amber-500/35 text-amber-300";
 
-    // fréquent -> rouge, pulse seulement si avgRisk élevé
+    // chaud -> rouge, pulse seulement si avgRisk élevé
     return risk >= 70
       ? "bg-red-500/25 border-red-500/35 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.25)] animate-pulse"
       : "bg-red-500/20 border-red-500/30 text-red-300 shadow-[0_0_10px_rgba(239,68,68,0.15)]";
@@ -57,9 +77,7 @@ const ParisMap: React.FC<Props> = ({ data }) => {
 
             {/* petit badge count */}
             {stat.count > 0 && (
-              <span className="mt-1 text-[10px] font-bold opacity-90">
-                {stat.count}
-              </span>
+              <span className="mt-1 text-[10px] font-bold opacity-90">{stat.count}</span>
             )}
 
             {/* Tooltip */}
@@ -69,6 +87,13 @@ const ParisMap: React.FC<Props> = ({ data }) => {
               {stat.count > 0 && (
                 <div className="text-slate-400 text-[10px]">
                   Risque moy: {Math.round(stat.avgRisk)}/100
+                </div>
+              )}
+
+              {/* ✅ petit debug discret (tu peux supprimer après) */}
+              {stat.count > 0 && (
+                <div className="text-slate-500 text-[10px] mt-1">
+                  seuils: ≤{Math.round(q33)} vert • ≤{Math.round(q66)} orange
                 </div>
               )}
             </div>
